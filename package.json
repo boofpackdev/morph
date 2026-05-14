@@ -1,0 +1,52 @@
+{
+  "name": "@boofpackdev/pi-morph",
+  "version": "0.1.1",
+  "description": "Agent orchestration layer for pi — 5-stage pipeline: spark → plan → work → review → ship. Streamline your subagent workflow with 13 specialized agents across 5 phases.",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "morph",
+    "agent-orchestration",
+    "subagent",
+    "pipeline",
+    "multi-agent",
+    "software-development",
+    "code-review",
+    "ci-cd"
+  ],
+  "license": "MIT",
+  "author": "morph contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/morph"
+  },
+  "bugs": {
+    "url": "https://github.com/your-org/morph/issues"
+  },
+  "homepage": "https://github.com/your-org/morph#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"],
+    "prompts": ["./prompts"]
+  },
+  "files": [
+    "src/",
+    "agents/",
+    "prompts/",
+    "bin/",
+    "package.json",
+    "README.md"
+  ],
+  "bin": {
+    "morph": "bin/morph.js"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
