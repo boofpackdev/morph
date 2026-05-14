@@ -754,7 +754,6 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify(`Plan failed: ${err.message}`, "error");
             return;
           }
-        }
       }
 
       // ── Work ──
