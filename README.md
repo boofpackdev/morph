@@ -43,6 +43,7 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 
 | Command | Description |
 |---------|-------------|
+| `/morph:run <idea>` | **Guided pipeline** — runs all 5 phases with review gates between each |
 | `/morph:spark <idea>` | Start a new pipeline — refine idea into PRD |
 | `/morph:plan` | Create architecture plan from PRD |
 | `/morph:work` | Execute task DAG (pauses per wave for approval) |
@@ -51,6 +52,17 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 | `/morph:status` | Show current pipeline state |
 | `/morph:reset [phase]` | Reset to a specific phase or full reset |
 | `/morph:team` | Show agent team composition |
+
+## Shortcuts
+
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+M G` | **Guided run** — full pipeline with review gates |
+| `Ctrl+M S` | Spark — refine idea (uses editor text as input) |
+| `Ctrl+M P` | Plan — create architecture |
+| `Ctrl+M W` | Work — execute tasks |
+| `Ctrl+M R` | Review — audit implementation |
+| `Ctrl+M H` | Ship — release with changelog |
 
 ## Architecture
 

@@ -1,7 +1,7 @@
 {
   "name": "@boofpackdev/pi-morph",
-  "version": "0.1.1",
-  "description": "Agent orchestration layer for pi — 5-stage pipeline: spark → plan → work → review → ship. Streamline your subagent workflow with 13 specialized agents across 5 phases.",
+  "version": "0.2.0",
+  "description": "Agent orchestration layer for pi — guided 5-stage pipeline: spark → plan → work → review → ship. Colored TUI progress bar, review gates between phases, retry-feedback loop.",
   "keywords": [
     "pi-package",
     "pi-extension",

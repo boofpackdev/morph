@@ -12,10 +12,7 @@
 import { Blackboard } from "../core/blackboard.js";
 import {
   runAgent,
-  runAgentsParallel,
   PLAN_AGENTS,
-  type AgentConfig,
-  type AgentResult,
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
 import { formatDAG, topologicalSort } from "../core/engine.js";
@@ -149,21 +146,7 @@ Produce:
 [Rough estimate of implementation effort and compute cost]`;
 
   const planText = architectResult.output || "";
-  const architectTaskParsed = parseTasks(planText);
 
-  const [qaResult, efficiencyResult] = await runAgentsParallel(
-    [qaExpert, efficiencyMgr],
-    {
-      cwd,
-      task: `Architecture plan:\n${planText}`,
-      systemPrompt: "", // Each agent has their own prompt
-      signal,
-    },
-    2
-  );
-
-  // Override system prompts per agent (parallel runner uses same for all)
-  // We need separate runs — let's do sequential for clarity
   const qaResultActual = await runAgent(qaExpert, {
     cwd,
     task: `Architecture plan:\n${planText}\n\nReview for testability and QA strategy.`,

@@ -3,13 +3,14 @@
  *
  * Renders live pipeline state in the terminal:
  *   - Phase dashboard widget (above editor)
+ *   - Pipeline progress bar with color-coded phases
  *   - Agent activity indicators
  *   - Task tracker with status icons + progress bar
  *   - Token cost counter in status bar
  *   - Rich message rendering
  */
 
-import { Text, Container, Spacer } from "@earendil-works/pi-tui";
+import { Text, Container, Spacer, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
 // ── Phase metadata ──
@@ -33,6 +34,18 @@ const PHASE_LABELS: Record<string, string> = {
   ship: "Ship — Release",
   done: "Complete",
 };
+
+// ── Phase progression order ──
+
+export const PHASE_ORDER = ["idle", "spark", "plan", "work", "review", "ship", "done"] as const;
+
+export const ALL_PHASES = [
+  { id: "spark", icon: "💡", label: "Spark" },
+  { id: "plan", icon: "📋", label: "Plan" },
+  { id: "work", icon: "🔨", label: "Work" },
+  { id: "review", icon: "🔍", label: "Review" },
+  { id: "ship", icon: "🚀", label: "Ship" },
+];
 
 // ── Helpers ──
 
@@ -125,6 +138,120 @@ export function buildPhaseWidget(state: PipelineDisplay): string[] {
   }
 
   return lines;
+}
+
+/**
+ * Build a colored pipeline progress widget for the TUI.
+ * Shows all 5 phases with filled/empty bars and color-coded status.
+ *
+ * Works as a theme-aware component for ctx.ui.setWidget's callback form.
+ */
+export function buildPipelineProgressWidget(
+  display: PipelineDisplay,
+  theme: Theme
+): { render: (width: number) => string[]; invalidate: () => void } {
+  const currentIdx = PHASE_ORDER.indexOf(display.phase as any);
+  const barW = 16;
+
+  function phaseBar(status: "done" | "current" | "pending" | "failed"): string {
+    const filled =
+      status === "done"
+        ? barW
+        : status === "current"
+          ? Math.ceil(barW * 0.55)
+          : 0;
+    const empty = barW - filled;
+    return "█".repeat(filled) + "░".repeat(empty);
+  }
+
+  function phaseStatus(phaseId: string): "done" | "current" | "pending" | "failed" {
+    const idx = PHASE_ORDER.indexOf(phaseId as any);
+    if (idx < 0 || currentIdx < 0) return "pending";
+    if (idx < currentIdx) return "done";
+    if (idx === currentIdx) return "current";
+    return "pending";
+  }
+
+  return {
+    render: (width: number) => {
+      const lines: string[] = [];
+
+      if (display.phase === "idle") {
+        lines.push(theme.fg("dim", "  morph — Ready"));
+        lines.push(theme.fg("dim", "   /morph:run <idea> to start"));
+        return lines;
+      }
+
+      if (display.phase === "done") {
+        lines.push(theme.fg("success", theme.bold("  ✅  morph — Pipeline Complete!")));
+        if (display.tokenLedger.total > 0) {
+          lines.push(
+            `   ${theme.fg("success", "✓")}  ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`
+          );
+        }
+        return lines;
+      }
+
+      // Title
+      lines.push(theme.fg("accent", theme.bold("  morph — Pipeline Progress")));
+      lines.push("");
+
+      for (const phase of ALL_PHASES) {
+        const status = phaseStatus(phase.id);
+        const barStr = phaseBar(status);
+        const sIcon =
+          status === "done"
+            ? theme.fg("success", "✓")
+            : status === "current"
+              ? theme.fg("accent", "⏳")
+              : theme.fg("dim", "○");
+
+        const coloredBar =
+          status === "done"
+            ? theme.fg("success", barStr)
+            : status === "current"
+              ? theme.fg("accent", barStr)
+              : theme.fg("dim", barStr);
+
+        // Pad the label manually avoiding ANSI width issues
+        const rawLabel = `${phase.icon} ${phase.label}`;
+        const padAmount = 11 - rawLabel.length;
+        const paddedLabel = rawLabel + " ".repeat(Math.max(0, padAmount));
+
+        lines.push(`  ${paddedLabel}${coloredBar}  ${sIcon}`);
+      }
+
+      lines.push("");
+
+      // Task summary (only in work phase)
+      if (display.phase === "work" && display.tasks.length > 0) {
+        const done = display.tasks.filter((t) => t.status === "done").length;
+        const total = display.tasks.length;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        const color = done === total ? "success" : "accent";
+        lines.push(`   ${theme.fg(color, `Tasks: ${done}/${total} (${pct}%)`)}`);
+      }
+
+      // Token cost
+      if (display.tokenLedger.total > 0) {
+        lines.push(`   ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`);
+      }
+
+      // Bottom hint
+      if (display.phase !== "done") {
+        lines.push(
+          theme.fg("dim", "   /morph:run to continue  •  /morph:status for details")
+        );
+      }
+
+      // Ensure lines don't exceed width (ANSI-safe truncation)
+      return lines.map((l) => {
+        if (l.length > width) return truncateToWidth(l, width);
+        return l;
+      });
+    },
+    invalidate: () => {},
+  };
 }
 
 /**
@@ -223,7 +350,7 @@ function statusIcon(status: string): string {
   }
 }
 
-function formatDisplayTokens(count: number): string {
+export function formatDisplayTokens(count: number): string {
   if (count < 1000) return String(count);
   if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
   return `${Math.round(count / 1000)}k`;

@@ -28,6 +28,7 @@ export interface AgentConfig {
   name: string;
   role: string;
   description: string;
+  provider?: string;
   model?: string;
   tools?: string[];
   thinkingLevel?: string;
@@ -57,6 +58,7 @@ export interface RunAgentOptions {
   cwd: string;
   task: string;
   systemPrompt: string;
+  provider?: string;
   model?: string;
   tools?: string[];
   thinkingLevel?: string;
@@ -74,6 +76,7 @@ export const SPARK_AGENTS: AgentConfig[] = [
     role: "Visionary",
     description:
       "Creative product thinker who envisions the solution and user experience",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "high",
@@ -83,6 +86,7 @@ export const SPARK_AGENTS: AgentConfig[] = [
     role: "Critic",
     description:
       "Sharp skeptic who stress-tests ideas, finds edge cases, and identifies risks",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "medium",
@@ -95,6 +99,7 @@ export const PLAN_AGENTS: AgentConfig[] = [
     role: "Lead Architect",
     description:
       "Senior software architect who designs system structure, data models, and component boundaries",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "grep", "find", "bash"],
     thinkingLevel: "high",
@@ -104,6 +109,7 @@ export const PLAN_AGENTS: AgentConfig[] = [
     role: "QA Expert",
     description:
       "Quality assurance specialist who designs test strategies and acceptance criteria",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "medium",
@@ -113,6 +119,7 @@ export const PLAN_AGENTS: AgentConfig[] = [
     role: "Efficiency Manager",
     description:
       "Optimization specialist who identifies waste, simplifies designs, and reduces token/effort costs",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "low",
@@ -125,6 +132,7 @@ export const WORK_AGENTS: AgentConfig[] = [
     role: "Primary Engineer",
     description:
       "Senior engineer who implements features with clean, tested, efficient code",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "write", "edit", "bash", "grep", "find"],
     thinkingLevel: "medium",
@@ -134,6 +142,7 @@ export const WORK_AGENTS: AgentConfig[] = [
     role: "Peer Reviewer",
     description:
       "Second engineer who reviews code for correctness, edge cases, and style",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find", "bash"],
     thinkingLevel: "low",
@@ -146,6 +155,7 @@ export const REVIEW_AGENTS: AgentConfig[] = [
     role: "Tech Lead",
     description:
       "Senior technical reviewer assessing architecture, patterns, and code quality",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "grep", "find", "bash"],
     thinkingLevel: "high",
@@ -155,6 +165,7 @@ export const REVIEW_AGENTS: AgentConfig[] = [
     role: "QA Auditor",
     description:
       "Testing specialist reviewing test coverage, edge cases, and verification completeness",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "medium",
@@ -164,6 +175,7 @@ export const REVIEW_AGENTS: AgentConfig[] = [
     role: "Performance Guru",
     description:
       "Performance expert analyzing efficiency, bottlenecks, and optimization opportunities",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find", "bash"],
     thinkingLevel: "medium",
@@ -173,6 +185,7 @@ export const REVIEW_AGENTS: AgentConfig[] = [
     role: "End User / Customer",
     description:
       "Simulates the end user's perspective: usability, clarity, onboarding, and real-world usage",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "low",
@@ -185,6 +198,7 @@ export const SHIP_AGENTS: AgentConfig[] = [
     role: "DevOps / SRE",
     description:
       "Infrastructure and reliability specialist handling deployment, monitoring, and rollback plans",
+    provider: "anthropic",
     model: "claude-sonnet-4-5",
     tools: ["read", "bash", "grep", "find"],
     thinkingLevel: "medium",
@@ -194,6 +208,7 @@ export const SHIP_AGENTS: AgentConfig[] = [
     role: "Release Consultant",
     description:
       "Release management specialist handling changelogs, versioning, and stakeholder communication",
+    provider: "anthropic",
     model: "claude-haiku-4-5",
     tools: ["read", "grep", "find"],
     thinkingLevel: "low",
@@ -248,6 +263,7 @@ export async function runAgent(
     additionalArgs = [],
   } = options;
 
+  const provider = options.provider || config.provider || "anthropic";
   const model = options.model || config.model || "claude-sonnet-4-5";
   const tools = options.tools || config.tools;
   const thinkingLevel = options.thinkingLevel || config.thinkingLevel || "off";
@@ -276,6 +292,8 @@ export async function runAgent(
     "json",
     "-p",
     "--no-session",
+    "--provider",
+    provider,
     "--model",
     model,
     "--thinking",

@@ -24,7 +24,7 @@ import {
   type PipelineDisplay,
   type TaskDisplay,
   type AgentActivity,
-  buildPhaseWidget,
+  buildPipelineProgressWidget,
   buildTaskTracker,
   buildStatusBar,
 } from "./tui/display.js";
@@ -103,11 +103,18 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // ── Update the phase widget (persistent, above editor) ──
-  function updateWidget(ctx: { ui: { setWidget: (id: string, lines: string[], opts?: any) => void } }) {
+  // ── Update the phase widget with colored pipeline progress ──
+  function updateWidget(ctx: {
+    ui: {
+      setWidget: (id: string, lines: string[] | ((tui: any, theme: any) => { render: (w: number) => string[]; invalidate: () => void }), opts?: any) => void;
+    };
+  }) {
     const display = buildPipelineDisplay();
-    const lines = buildPhaseWidget(display);
-    ctx.ui.setWidget("morph", lines, { placement: "aboveEditor" });
+    ctx.ui.setWidget(
+      "morph",
+      (_tui: any, theme: any) => buildPipelineProgressWidget(display, theme),
+      { placement: "aboveEditor" }
+    );
   }
 
   // ── Session lifecycle ──
@@ -170,6 +177,18 @@ export default function (pi: ExtensionAPI) {
     description: "morph: Ship",
     handler: async (ctx) => {
       ctx.ui.setEditorText?.("/morph:ship");
+    },
+  });
+
+  pi.registerShortcut("ctrl+m g", {
+    description: "morph: Guided run (full pipeline)",
+    handler: async (ctx) => {
+      const text = ctx.ui.getEditorText?.() || "";
+      if (text.trim()) {
+        ctx.ui.setEditorText?.("/morph:run " + text);
+      } else {
+        ctx.ui.setEditorText?.("/morph:run");
+      }
     },
   });
 
@@ -339,7 +358,11 @@ export default function (pi: ExtensionAPI) {
       bb.transition("work");
       const display = buildPipelineDisplay();
       ctx.ui.setStatus("morph", buildStatusBar(display));
-      ctx.ui.setWidget("morph", buildPhaseWidget(display), { placement: "aboveEditor" });
+      ctx.ui.setWidget(
+        "morph",
+        (_tui: any, theme: any) => buildPipelineProgressWidget(display, theme),
+        { placement: "aboveEditor" }
+      );
       ctx.ui.notify(`Work: ${state.planOutput.tasks.length} tasks, ${waveGroups(state.planOutput.tasks).length} waves...`, "info");
 
       try {
@@ -366,7 +389,10 @@ export default function (pi: ExtensionAPI) {
             for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
             ctx.ui.setWidget(
               "morph",
-              buildPhaseWidget({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }),
+              (_tui: any, theme: any) => buildPipelineProgressWidget(
+                { ...buildPipelineDisplay(), tasks: [...liveTasks.values()] },
+                theme
+              ),
               { placement: "aboveEditor" }
             );
 
@@ -390,7 +416,10 @@ export default function (pi: ExtensionAPI) {
             // Refresh widget
             ctx.ui.setWidget(
               "morph",
-              buildPhaseWidget({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }),
+              (_tui: any, theme: any) => buildPipelineProgressWidget(
+                { ...buildPipelineDisplay(), tasks: [...liveTasks.values()] },
+                theme
+              ),
               { placement: "aboveEditor" }
             );
 
@@ -415,7 +444,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("morph", `morph:review (ready) ✓  ${done}/${results.length} done`);
         ctx.ui.setWidget(
           "morph",
-          buildPhaseWidget(buildPipelineDisplay()),
+          (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
           { placement: "aboveEditor" }
         );
 
@@ -598,6 +627,313 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("morph", `morph:ship ✗  ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
         ctx.ui.notify(`Ship failed: ${err.message}`, "error");
+      }
+    },
+  });
+
+  // ═══════════════════════════════════════════
+  // GUIDED PIPELINE
+  // ═══════════════════════════════════════════
+
+  pi.registerCommand("morph:run", {
+    description: "Run the full pipeline with review gates: spark → plan → work → review → ship",
+    handler: async (args, ctx) => {
+      const bb = getBB();
+      let state = bb.getState();
+
+      // ── Handle stuck/failed phases ──
+      if (state.phase === "spark") {
+        ctx.ui.notify("⚠️  Spark phase failed or was interrupted. Run /morph:reset to restart.", "warning");
+        return;
+      }
+
+      // ── Determine starting point ──
+      if (state.phase === "idle") {
+        if (!args?.trim()) {
+          ctx.ui.notify("Usage: /morph:run <your idea> to start a new pipeline", "error");
+          return;
+        }
+        // Spark - run it first
+        bb.transition("spark");
+        updateWidget(ctx);
+        ctx.ui.setStatus("morph", "morph:run ⏳  Spark phase...");
+        ctx.ui.notify("🚀 morph pipeline started! Beginning Spark phase...", "info");
+
+        try {
+          currentAbortController = new AbortController();
+          const sparkOutput = await executeSparkFlow({
+            cwd: ctx.cwd,
+            prompt: args,
+            blackboard: bb,
+            signal: currentAbortController.signal,
+          });
+          bb.setSparkOutput(sparkOutput);
+          state = bb.getState();
+
+          ctx.ui.setStatus("morph", "morph:run ✓  Spark complete");
+          updateWidget(ctx);
+          ctx.ui.notify("💡 Spark complete! Review summary below.", "success");
+
+          // Gate: Spark → Plan
+          const sparkSummary = [
+            `# ✨ Spark Complete`,
+            ``,
+            `**Vision**: ${sparkOutput.visionStatement.slice(0, 300)}`,
+            ``,
+            `**Core Features** (${sparkOutput.coreFeatures.length}):`,
+            ...sparkOutput.coreFeatures.map((f) => `- ${f}`),
+            ``,
+            `**Target User**: ${sparkOutput.targetUserPersona.slice(0, 200)}`,
+            ``,
+            `**Tech Stack**: ${sparkOutput.technicalStackRecommendation}`,
+            ``,
+            `**Risks** (${sparkOutput.risks.length}):`,
+            ...sparkOutput.risks.slice(0, 5).map((r) => `- ${r}`),
+          ].join("\n");
+
+          const proceed = await ctx.ui.confirm(
+            "💡 Proceed to Plan phase?",
+            "Review the Spark output above. Edit specs in the editor / .morph/ files, then confirm to continue."
+          );
+          if (!proceed) {
+            ctx.ui.notify("Pipeline paused after Spark. Run /morph:run to continue.", "info");
+            return;
+          }
+        } catch (err: any) {
+          ctx.ui.setStatus("morph", `morph:run ✗  Spark failed: ${err.message.slice(0, 40)}`);
+          ctx.ui.notify(`Spark failed: ${err.message}`, "error");
+          return;
+        }
+      }
+
+      // ── Plan ──
+      if (state.phase === "plan") {
+          ctx.ui.setStatus("morph", "morph:run ⏳  Plan phase...");
+          ctx.ui.notify("📋 Plan: Architect + QA + Efficiency working...", "info");
+          updateWidget(ctx);
+
+          try {
+            currentAbortController = new AbortController();
+            const planOutput = await executePlanFlow({
+              cwd: ctx.cwd,
+              blackboard: bb,
+              signal: currentAbortController.signal,
+            });
+            bb.setPlanOutput(planOutput);
+            state = bb.getState();
+
+            const waves = waveGroups(planOutput.tasks);
+            ctx.ui.setStatus("morph", `morph:run ✓  ${planOutput.tasks.length} tasks planned`);
+            updateWidget(ctx);
+            ctx.ui.notify("📋 Plan complete! Review below.", "success");
+
+            // Gate: Plan → Work
+            const planSummary = [
+              `# 📋 Plan Complete`,
+              ``,  
+              `**${planOutput.tasks.length} tasks** in **${waves.length} waves**`,
+              ``,  
+              `**Architecture**:`,
+              `\`\`\`mermaid`,
+              planOutput.architectureDiagram.slice(0, 400),
+              `\`\`\``,
+              ``,  
+              `**QA Strategy**: ${planOutput.qaStrategy.slice(0, 200)}`,
+            ].join("\n");
+
+            const proceed = await ctx.ui.confirm(
+              "🔨 Proceed to Work phase?",
+              `${planOutput.tasks.length} tasks in ${waves.length} waves. Edit the plan in .morph/ then confirm.`
+            );
+            if (!proceed) {
+              ctx.ui.notify("Pipeline paused after Plan. Run /morph:run to continue.", "info");
+              return;
+            }
+          } catch (err: any) {
+            ctx.ui.setStatus("morph", `morph:run ✗  Plan failed: ${err.message.slice(0, 40)}`);
+            ctx.ui.notify(`Plan failed: ${err.message}`, "error");
+            return;
+          }
+        }
+      }
+
+      // ── Work ──
+      if (state.phase === "work") {
+        ctx.ui.setStatus("morph", "morph:run ⏳  Work phase...");
+        ctx.ui.notify("🔨 Work: executing task DAG...", "info");
+        updateWidget(ctx);
+
+        try {
+          currentAbortController = new AbortController();
+
+          const liveTasks = new Map<string, TaskDisplay>();
+          for (const t of state.planOutput!.tasks) {
+            liveTasks.set(t.id, { id: t.id, description: t.description, status: "pending" });
+          }
+
+          const results = await executeWorkFlow({
+            cwd: ctx.cwd,
+            blackboard: bb,
+            maxParallel: 3,
+            signal: currentAbortController.signal,
+
+            onWaveStart: async (wave, waveIndex) => {
+              for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
+              ctx.ui.setWidget(
+                "morph",
+                (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
+                { placement: "aboveEditor" }
+              );
+
+              // Brief wave confirmation in guided mode
+              const waveTasks = wave
+                .map((t) => `  ○ [${t.id}] ${t.description.slice(0, 50)} (${t.estimatedComplexity})`)
+                .join("\n");
+              const totalWaves = waveGroups(state.planOutput!.tasks).length;
+              const proceed = await ctx.ui.confirm(
+                `🌊 Wave ${waveIndex + 1}/${totalWaves}`,
+                `${wave.length} task(s):\n${waveTasks}\n\nExecute this wave?`
+              );
+              return proceed;
+            },
+
+            onTaskComplete: (result) => {
+              liveTasks.set(result.taskId, {
+                ...liveTasks.get(result.taskId)!,
+                status: result.status === "done" ? "done" : result.status === "blocked" ? "blocked" : "failed",
+              });
+              ctx.ui.setWidget(
+                "morph",
+                (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
+                { placement: "aboveEditor" }
+              );
+              const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
+              ctx.ui.setStatus("morph", `morph:run ⏳  Work: ${done}/${liveTasks.size} tasks`);
+
+              const icon = result.status === "done" ? "✓" : result.status === "blocked" ? "⊘" : "✗";
+              ctx.ui.notify(`${icon} [${result.taskId}] ${result.summary.slice(0, 80)}`, 
+                result.status === "done" ? "info" : "warning");
+            },
+          });
+
+          bb.finishWork();
+          state = bb.getState();
+
+          const done = results.filter((r) => r.status === "done").length;
+          const failed = results.filter((r) => r.status === "failed").length;
+          ctx.ui.setStatus("morph", `morph:run ✓  Work: ${done}/${results.length} done`);
+          updateWidget(ctx);
+          ctx.ui.notify(`🔨 Work complete! ${done}/${results.length} tasks done.`, "success");
+
+          // Gate: Work → Review
+          const workSummary = [
+            `# 🔨 Work Complete`,
+            ``,  
+            `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}`,
+            ``,  
+            ...results.map((r) => `- ${r.status === "done" ? "✓" : "✗"} [${r.taskId}] ${r.summary.slice(0, 80)}`),
+          ].join("\n");
+
+          const proceed = await ctx.ui.confirm(
+            "🔍 Proceed to Review phase?",
+            failed > 0
+              ? `${failed} task(s) failed. Fix issues first, then confirm to proceed.`
+              : `All ${done} tasks done. Confirm to start review.`
+          );
+          if (!proceed) {
+            ctx.ui.notify("Pipeline paused after Work. Run /morph:run to continue.", "info");
+            return;
+          }
+        } catch (err: any) {
+          ctx.ui.setStatus("morph", `morph:run ✗  Work failed: ${err.message.slice(0, 40)}`);
+          ctx.ui.notify(`Work failed: ${err.message}`, "error");
+          return;
+        }
+      }
+
+      // ── Review ──
+      if (state.phase === "review") {
+        ctx.ui.setStatus("morph", "morph:run ⏳  Review phase...");
+        ctx.ui.notify("🔍 Review: Tech Lead + QA + Perf + End User auditing...", "info");
+        updateWidget(ctx);
+
+        try {
+          currentAbortController = new AbortController();
+          const reviewOutput = await executeReviewFlow({
+            cwd: ctx.cwd,
+            blackboard: bb,
+            signal: currentAbortController.signal,
+          });
+          bb.setReviewOutput(reviewOutput);
+          state = bb.getState();
+
+          const verdictIcon = reviewOutput.status === "APPROVED" ? "✅" : "❌";
+          ctx.ui.setStatus("morph", `morph:run ${verdictIcon}  Review: ${reviewOutput.status}`);
+          updateWidget(ctx);
+          ctx.ui.notify(`🔍 Review: ${reviewOutput.status}`, 
+            reviewOutput.status === "APPROVED" ? "success" : "warning");
+
+          if (reviewOutput.status !== "APPROVED") {
+            ctx.ui.notify("❌ Review rejected. Fix issues and run /morph:run again.", "warning");
+            return;
+          }
+
+          // Gate: Review → Ship
+          const reviewSummary = [
+            `# ✅ Review — APPROVED`,
+            ``,  
+            `**Score**: ${reviewOutput.efficiencyScore}/10`,
+            ``,  
+            `**Technical Audit**:`,
+            reviewOutput.technicalAudit.slice(0, 300),
+            ``,  
+            `**Security**: ${reviewOutput.securityIssues.length > 0 ? reviewOutput.securityIssues.length + " issues" : "No issues"}`,
+          ].join("\n");
+
+          const proceed = await ctx.ui.confirm(
+            "🚀 Proceed to Ship phase?",
+            "Review approved! Confirm to release."
+          );
+          if (!proceed) {
+            ctx.ui.notify("Pipeline paused after Review. Run /morph:run to continue.", "info");
+            return;
+          }
+        } catch (err: any) {
+          ctx.ui.setStatus("morph", `morph:run ✗  Review failed: ${err.message.slice(0, 40)}`);
+          ctx.ui.notify(`Review failed: ${err.message}`, "error");
+          return;
+        }
+      }
+
+      // ── Ship ──
+      if (state.phase === "ship") {
+        ctx.ui.setStatus("morph", "morph:run ⏳  Ship phase...");
+        ctx.ui.notify("🚀 Ship: DevOps + Release Consultant preparing release...", "info");
+        updateWidget(ctx);
+
+        try {
+          currentAbortController = new AbortController();
+          const shipOutput = await executeShipFlow({
+            cwd: ctx.cwd,
+            blackboard: bb,
+            signal: currentAbortController.signal,
+          });
+          bb.setShipOutput(shipOutput);
+          state = bb.getState();
+
+          ctx.ui.setStatus("morph", `morph:run 🚀  v${shipOutput.version} shipped`);
+          updateWidget(ctx);
+          ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Pipeline complete.`, "success");
+        } catch (err: any) {
+          ctx.ui.setStatus("morph", `morph:run ✗  Ship failed: ${err.message.slice(0, 40)}`);
+          ctx.ui.notify(`Ship failed: ${err.message}`, "error");
+          return;
+        }
+      }
+
+      // ── Done ──
+      if (state.phase === "done") {
+        ctx.ui.notify("🎉 morph pipeline is already complete! /morph:status for details.", "info");
       }
     },
   });

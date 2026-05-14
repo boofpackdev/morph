@@ -151,6 +151,7 @@ async function executeSingleTask(
   onTaskComplete?: (result: WorkTaskResult) => void
 ): Promise<WorkTaskResult> {
   let attempt = 0;
+  let lastReviewFeedback = "";
 
   while (attempt < maxRetries) {
     attempt++;
@@ -159,6 +160,10 @@ async function executeSingleTask(
     }
 
     // ── Engineer implements ──
+    const feedbackBlock = lastReviewFeedback
+      ? `\n\n## Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
+      : "";
+
     const engSystemPrompt = `You are the **Primary Engineer** for the morph orchestration pipeline.
 
 ## Your Role
@@ -170,7 +175,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}
+- Complexity: ${task.estimatedComplexity}${feedbackBlock}
 
 ## Instructions
 1. Read relevant existing files first
@@ -260,8 +265,8 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
 
     // Changes requested — feed back to engineer if retries remain
     if (canRetry(task.id, blackboard, maxRetries)) {
-      // The engineer will retry with reviewer feedback on next loop iteration
-      // We append the review feedback to the next task
+      // Store reviewer feedback so the engineer sees it on the next attempt
+      lastReviewFeedback = reviewOutput;
       continue;
     }
 
