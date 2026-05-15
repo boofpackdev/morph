@@ -65,14 +65,21 @@ export async function executeWorkFlow(
     throw new Error("No plan output found. Run plan flow first.");
   }
 
+  const state = blackboard.getState();
   const engineer = WORK_AGENTS.find((a) => a.name === "engineer")!;
   const reviewer = WORK_AGENTS.find((a) => a.name === "peer-reviewer")!;
 
   // Sort tasks topologically
   const sorted = topologicalSort(planOutput.tasks);
-  const completedIds = new Set<string>();
-  const processedIds = new Set<string>();
-  const allResults: WorkTaskResult[] = [];
+  const completedIds = new Set<string>(
+    state.workResults
+      .filter((r) => r.status === "done")
+      .map((r) => r.taskId)
+  );
+  const processedIds = new Set<string>(
+    state.workResults.map((r) => r.taskId)
+  );
+  const allResults: WorkTaskResult[] = [...state.workResults];
   let waveIndex = 0;
 
   // Process waves
@@ -354,6 +361,28 @@ ${humanReviewNotes}`
   // ── Fix 4: Build docs context block for documentation tasks ──
   const docsContextBlock = task.category === "docs" ? buildDocsContextBlock(blackboard) : "";
 
+  // ── Autorecovery: Inject global review feedback ──
+  const reviewOutput = blackboard.getState().reviewOutput;
+  let globalReviewBlock = "";
+  if (reviewOutput && reviewOutput.status !== "APPROVED") {
+    const taskChanges = reviewOutput.requiredChanges
+      .filter((c) => c.taskId === task.id || !c.taskId)
+      .map((c) => `- [${c.severity}] ${c.description}`)
+      .join("\n");
+
+    if (taskChanges) {
+      globalReviewBlock = `\n\n## Global Review Feedback (REJECTION FIXES)
+The overall project review was REJECTED. You MUST address these specific findings related to this task or the project as a whole:
+${taskChanges}
+
+### Global Technical Audit
+${reviewOutput.technicalAudit}
+
+### User Perspective
+${reviewOutput.userPerspectiveFeedback}`;
+    }
+  }
+
   while (attempt < maxRetries) {
     attempt++;
     const filesBeforeAttempt = snapshotChangedFiles(repoRoot);
@@ -364,7 +393,7 @@ ${humanReviewNotes}`
 
     // ── Engineer implements ──
     const feedbackBlock = lastReviewFeedback
-      ? `\n\n## Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
+      ? `\n\n## Local Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes during the previous implement-review loop for this specific task:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
       : "";
 
     const targetDirNote = task.targetDir
@@ -382,7 +411,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}
+- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${globalReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}
 
 ## Instructions
 1. Read relevant existing files first

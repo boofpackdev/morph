@@ -180,9 +180,29 @@ export class Blackboard {
     this.save();
   }
 
-  /** Add a completed work task result. */
+  /** Add or update a work task result. */
   addWorkResult(result: MorphState["workResults"][number]): void {
-    this.state.workResults.push(result);
+    const existingIdx = this.state.workResults.findIndex(
+      (r) => r.taskId === result.taskId
+    );
+    if (existingIdx >= 0) {
+      this.state.workResults[existingIdx] = result;
+    } else {
+      this.state.workResults.push(result);
+    }
+    this.save();
+  }
+
+  /** Clear work results for specific tasks (to trigger re-work). */
+  clearWorkResults(taskIds?: string[]): void {
+    if (!taskIds) {
+      this.state.workResults = [];
+    } else {
+      const idSet = new Set(taskIds);
+      this.state.workResults = this.state.workResults.filter(
+        (r) => !idSet.has(r.taskId)
+      );
+    }
     this.save();
   }
 
