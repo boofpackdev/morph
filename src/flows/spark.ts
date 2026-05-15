@@ -24,12 +24,13 @@ export interface SparkFlowOptions {
   prompt: string;
   blackboard: Blackboard;
   signal?: AbortSignal;
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
 }
 
 export async function executeSparkFlow(
   options: SparkFlowOptions
 ): Promise<SparkOutput> {
-  const { cwd, prompt, blackboard, signal } = options;
+  const { cwd, prompt, blackboard, signal, onAgentEvent } = options;
 
   const visionary = SPARK_AGENTS.find((a) => a.name === "visionary")!;
   const critic = SPARK_AGENTS.find((a) => a.name === "critic")!;
@@ -78,6 +79,7 @@ Be exhaustive. Think through edge cases. This PRD will be stress-tested by a Cri
     systemPrompt: visionarySystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(visionary.name, visionary.role, "-", event),
   });
 
   blackboard.addTokens(
@@ -123,6 +125,7 @@ Be sharp, specific, and constructive. Every criticism must come with a suggested
     systemPrompt: criticSystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(critic.name, critic.role, "-", event),
   });
 
   blackboard.addTokens("spark", estimateTokens(criticResult.output || ""));
@@ -170,6 +173,7 @@ Be concise. This output flows directly to the Plan phase.`;
     systemPrompt: synthesisSystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(visionary.name, visionary.role, "-", event),
   });
 
   blackboard.addTokens("spark", estimateTokens(synthesisResult.output || ""));

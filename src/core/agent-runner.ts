@@ -67,6 +67,7 @@ export interface RunAgentOptions {
   additionalArgs?: string[];
   prependSystemPrompt?: boolean; // true = replace system prompt, false = append
   blackboard?: any;
+  onEvent?: (event: any) => void;
 }
 
 // ── Default Agent Teams ──
@@ -358,6 +359,7 @@ export async function runAgent(
 
         // Strip reasoning tokens from events
         stripJsonReasoning(event);
+        options.onEvent?.(event);
 
         // Process message_end events
         if (event.type === "message_end" && event.message) {

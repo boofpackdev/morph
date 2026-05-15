@@ -30,6 +30,7 @@ import type {
 } from "../schemas/contracts.js";
 import { generateDiff } from "../utils/diff.js";
 import * as path from "node:path";
+import * as fs from "node:fs";
 import { execSync } from "node:child_process";
 
 export interface WorkFlowOptions {
@@ -42,6 +43,7 @@ export interface WorkFlowOptions {
   onWaveStart?: (wave: TaskNode[], waveIndex: number) => Promise<boolean>;
   /** Called after each task completes */
   onTaskComplete?: (result: WorkTaskResult) => void;
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
 }
 
 export async function executeWorkFlow(
@@ -55,6 +57,7 @@ export async function executeWorkFlow(
     signal,
     onWaveStart,
     onTaskComplete,
+    onAgentEvent,
   } = options;
 
   const planOutput = blackboard.getState().planOutput;
@@ -135,7 +138,8 @@ export async function executeWorkFlow(
             blackboard,
             maxRetries,
             signal,
-            onTaskComplete
+            onTaskComplete,
+            onAgentEvent
           )
         )
       );
@@ -198,6 +202,96 @@ function commitScaffoldResults(task: TaskNode, cwd: string): void {
   }
 }
 
+function findGitRoot(cwd: string): string | null {
+  try {
+    return execSync("git rev-parse --show-toplevel", {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function snapshotChangedFiles(repoRoot: string | null): Set<string> {
+  if (!repoRoot) return new Set();
+  try {
+    const output = execSync("git status --porcelain", {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return new Set(
+      output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => line.slice(3).trim())
+        .map((file) => file.includes(" -> ") ? file.split(" -> ").pop()!.trim() : file)
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function diffChangedFiles(before: Set<string>, after: Set<string>): string[] {
+  return [...after].filter((file) => !before.has(file)).sort();
+}
+
+function snapshotWorkingTree(repoRoot: string | null): Map<string, string> {
+  if (!repoRoot) return new Map();
+  try {
+    const tracked = execSync("git ls-files", {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split(/\r?\n/)
+      .filter(Boolean);
+    const untracked = execSync("git ls-files --others --exclude-standard", {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split(/\r?\n/)
+      .filter(Boolean);
+    const files = [...new Set([...tracked, ...untracked])];
+    const snapshot = new Map<string, string>();
+    for (const file of files) {
+      const absolute = path.join(repoRoot, file);
+      try {
+        const stat = fs.statSync(absolute);
+        snapshot.set(file, `${stat.mtimeMs}:${stat.size}`);
+      } catch {
+        snapshot.set(file, "missing");
+      }
+    }
+    return snapshot;
+  } catch {
+    return new Map();
+  }
+}
+
+function diffWorkingTree(before: Map<string, string>, after: Map<string, string>): string[] {
+  const changed = new Set<string>();
+  for (const [file, fingerprint] of after) {
+    if (before.get(file) !== fingerprint) changed.add(file);
+  }
+  for (const file of before.keys()) {
+    if (!after.has(file)) changed.add(file);
+  }
+  return [...changed].sort();
+}
+
+function mergeChangedFiles(...lists: string[][]): string[] {
+  return [...new Set(lists.flat())].sort();
+}
+
 /**
  * Build spark context for docs/reference tasks so the agent has actual content to document.
  */
@@ -239,10 +333,12 @@ async function executeSingleTask(
   blackboard: Blackboard,
   maxRetries: number,
   signal?: AbortSignal,
-  onTaskComplete?: (result: WorkTaskResult) => void
+  onTaskComplete?: (result: WorkTaskResult) => void,
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void
 ): Promise<WorkTaskResult> {
   // ── Fix 2: Resolve project-scoped cwd ──
   const cwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+  const repoRoot = findGitRoot(baseCwd);
 
   let attempt = 0;
   let lastReviewFeedback = "";
@@ -260,6 +356,8 @@ ${humanReviewNotes}`
 
   while (attempt < maxRetries) {
     attempt++;
+    const filesBeforeAttempt = snapshotChangedFiles(repoRoot);
+    const treeBeforeAttempt = snapshotWorkingTree(repoRoot);
     if (attempt > 1) {
       blackboard.incrementRetry(task.id);
     }
@@ -304,6 +402,7 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
       systemPrompt: engSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(engineer.name, engineer.role, task.id, event),
     });
 
     blackboard.addTokens(
@@ -317,7 +416,10 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
         taskId: task.id,
         status: "failed",
         summary: engResult.errorMessage || engResult.output || "Implementation failed",
-        filesChanged: [],
+        filesChanged: mergeChangedFiles(
+          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
+        ),
       };
       onTaskComplete?.(result);
       return result;
@@ -354,6 +456,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       systemPrompt: revSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(reviewer.name, reviewer.role, task.id, event),
     });
 
     blackboard.addTokens(
@@ -372,7 +475,10 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         taskId: task.id,
         status: "done",
         summary: engResult.output || "Task completed",
-        filesChanged: [],
+        filesChanged: mergeChangedFiles(
+          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
+        ),
         testsPassed: true,
       };
       onTaskComplete?.(result);
@@ -390,7 +496,10 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       taskId: task.id,
       status: "failed",
       summary: `Review rejected after ${maxRetries} attempts: ${reviewOutput.slice(0, 200)}`,
-      filesChanged: [],
+      filesChanged: mergeChangedFiles(
+        diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+        diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
+      ),
     };
     onTaskComplete?.(result);
     return result;

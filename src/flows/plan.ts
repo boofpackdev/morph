@@ -17,17 +17,20 @@ import {
 import { estimateTokens } from "../core/tokenizer.js";
 import { formatDAG, topologicalSort } from "../core/engine.js";
 import type { PlanOutput, TaskNode } from "../schemas/contracts.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export interface PlanFlowOptions {
   cwd: string;
   blackboard: Blackboard;
   signal?: AbortSignal;
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
 }
 
 export async function executePlanFlow(
   options: PlanFlowOptions
 ): Promise<PlanOutput> {
-  const { cwd, blackboard, signal } = options;
+  const { cwd, blackboard, signal, onAgentEvent } = options;
   const sparkOutput = blackboard.getState().sparkOutput;
   if (!sparkOutput) {
     throw new Error("No spark output found. Run spark flow first.");
@@ -74,6 +77,8 @@ Each task must have:
 - dependsOn: array of task IDs this depends on (empty if none)
 - acceptanceCriteria: how to verify completion
 - estimatedComplexity: low | medium | high
+- files: expected files or glob-like paths this task will create/change
+- targetDir: the project subdirectory this task belongs to, relative to repo root. Use "." for repo root.
 
 The DAG must be complete: every component from the component tree must have
 corresponding tasks. Tasks must be ordered correctly (database before API, etc.).
@@ -88,6 +93,7 @@ Be exhaustive. This plan drives the entire implementation phase.`;
     systemPrompt: architectSystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
   });
 
   blackboard.addTokens("plan", estimateTokens(architectResult.output || ""));
@@ -154,6 +160,7 @@ Produce:
     systemPrompt: qaSystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(qaExpert.name, qaExpert.role, "-", event),
   });
 
   const effResultActual = await runAgent(efficiencyMgr, {
@@ -162,6 +169,7 @@ Produce:
     systemPrompt: efficiencySystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(efficiencyMgr.name, efficiencyMgr.role, "-", event),
   });
 
   blackboard.addTokens("plan", estimateTokens(qaResultActual.output || ""));
@@ -202,7 +210,9 @@ Only create tasks that produce actual code, tests, configuration, or documentati
     "category": "db",
     "dependsOn": [],
     "acceptanceCriteria": "Migration runs cleanly; schema has all required columns with correct types",
-    "estimatedComplexity": "low"
+    "estimatedComplexity": "low",
+    "files": ["src/db/schema.ts"],
+    "targetDir": "."
   },
   {
     "id": "API-01",
@@ -210,7 +220,9 @@ Only create tasks that produce actual code, tests, configuration, or documentati
     "category": "api",
     "dependsOn": ["DB-01"],
     "acceptanceCriteria": "Can create a user via POST; returns 201 with user object; returns 400 on invalid input",
-    "estimatedComplexity": "medium"
+    "estimatedComplexity": "medium",
+    "files": ["src/routes/users.ts", "tests/users.test.ts"],
+    "targetDir": "."
   }
 ]
 \`\`\`
@@ -226,7 +238,8 @@ One of: hours | days | weeks
 
 Make sure the task DAG is complete and all dependencies are correct.
 Every component must have corresponding tasks. Every dependency must reference a real task ID.
-Tasks must form a valid DAG (no cycles).`;
+Tasks must form a valid DAG (no cycles).
+Use the SAME targetDir for related work on the same deliverable. If the requested feature/site/app is meant to live in a subdirectory, place every related task in that subdirectory consistently rather than mixing root and nested paths.`;
 
   const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaResultActual.output}\n\nEfficiency feedback:\n${effResultActual.output}\n\nSynthesize the FINAL plan.`;
 
@@ -236,12 +249,13 @@ Tasks must form a valid DAG (no cycles).`;
     systemPrompt: synthesisSystemPrompt,
     signal,
     blackboard,
+    onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
   });
 
   blackboard.addTokens("plan", estimateTokens(finalResult.output || ""));
 
   // ── Parse output into structured PlanOutput ──
-  const planOutput = parsePlanOutput(finalResult.output || "");
+  const planOutput = normalizePlanOutput(parsePlanOutput(finalResult.output || ""), cwd, sparkOutput);
 
   // Validate DAG
   try {
@@ -501,6 +515,75 @@ function parsePlanOutput(text: string): PlanOutput {
     riskMitigations: extractList("RISK MITIGATIONS"),
     estimatedEffort,
   };
+}
+
+function normalizePlanOutput(
+  plan: PlanOutput,
+  cwd: string,
+  spark: NonNullable<ReturnType<Blackboard["getState"]>["sparkOutput"]>
+): PlanOutput {
+  const inferredDefaultTarget = inferDefaultTargetDir(cwd, spark);
+  return {
+    ...plan,
+    tasks: plan.tasks.map((task) => ({
+      ...task,
+      files: task.files?.length ? task.files : inferFilesForTask(task),
+      targetDir: normalizeTargetDir(task.targetDir, inferredDefaultTarget),
+    })),
+  };
+}
+
+function inferDefaultTargetDir(
+  cwd: string,
+  spark: NonNullable<ReturnType<Blackboard["getState"]>["sparkOutput"]>
+): string {
+  const rootHasProjectMarker = ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod"]
+    .some((file) => fs.existsSync(path.join(cwd, file)));
+
+  const nestedProjectDirs = fs.readdirSync(cwd, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .map((entry) => entry.name)
+    .filter((dir) => ["package.json", "pyproject.toml", "requirements.txt", "Cargo.toml", "go.mod", "index.html"]
+      .some((file) => fs.existsSync(path.join(cwd, dir, file))));
+
+  const text = [
+    spark.visionStatement,
+    ...spark.coreFeatures,
+    spark.technicalStackRecommendation,
+  ].join(" ").toLowerCase();
+
+  const matchingNestedDir = nestedProjectDirs.find((dir) => text.includes(dir.toLowerCase()));
+  if (matchingNestedDir) return matchingNestedDir;
+  if (!rootHasProjectMarker && nestedProjectDirs.length === 1) return nestedProjectDirs[0];
+  return ".";
+}
+
+function normalizeTargetDir(targetDir: string | undefined, fallback: string): string {
+  const normalized = targetDir?.trim();
+  if (!normalized || normalized === "/") return fallback;
+  if (normalized === ".") return ".";
+  return normalized.replace(/^[.][/\\]/, "").replace(/\\/g, "/");
+}
+
+function inferFilesForTask(task: TaskNode): string[] {
+  switch (task.category) {
+    case "test":
+      return ["tests/**"];
+    case "docs":
+      return ["README.md"];
+    case "config":
+      return ["package.json"];
+    case "ui":
+      return ["src/**"];
+    case "api":
+      return ["src/**", "tests/**"];
+    case "db":
+      return ["src/**"];
+    case "infra":
+      return ["infra/**"];
+    default:
+      return [];
+  }
 }
 
 function parseComponents(

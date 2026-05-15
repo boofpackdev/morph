@@ -27,12 +27,13 @@ export interface ShipFlowOptions {
   version?: string;
   /** Deployment target (production, staging, etc.) */
   target?: string;
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
 }
 
 export async function executeShipFlow(
   options: ShipFlowOptions
 ): Promise<ShipOutput> {
-  const { cwd, blackboard, signal, version, target = "production" } = options;
+  const { cwd, blackboard, signal, version, target = "production", onAgentEvent } = options;
 
   const state = blackboard.getState();
   const sparkOutput = state.sparkOutput;
@@ -116,6 +117,7 @@ Keep the changelog clear and user-focused. No internal jargon.`;
       systemPrompt: devopsSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(devops.name, devops.role, "-", event),
     }),
     runAgent(releaseConsultant, {
       cwd,
@@ -123,6 +125,7 @@ Keep the changelog clear and user-focused. No internal jargon.`;
       systemPrompt: consultantSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(releaseConsultant.name, releaseConsultant.role, "-", event),
     }),
   ]);
 

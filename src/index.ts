@@ -27,13 +27,15 @@ import {
   type PipelineDisplay,
   type TaskDisplay,
   type AgentActivity,
+  type SubagentActivity,
+  type PhaseContext,
   buildPipelineProgressWidget,
   buildTaskTracker,
   buildStatusBar,
 } from "./tui/display.js";
 import { startMorphServer, serverEvents } from "./server/server.js";
 import type { Server } from "node:http";
-import type { PlanOutput } from "./schemas/contracts.js";
+import type { PlanOutput, SparkOutput } from "./schemas/contracts.js";
 
 async function waitConfirm(ctx: any, title: string, desc: string, phase: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -66,20 +68,188 @@ function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-function buildWorkSpecMarkdown(plan: PlanOutput): string {
+function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
   const waves = waveGroups(plan.tasks);
-  const lines: string[] = ["# morph Pre-Work Specification Review", "", "Review this specification before WORK starts. Edit anything that needs clarification, scope adjustment, or constraints.", "The final text saved from this editor is passed to implementation and review agents as human-approved guidance.", "", "## Architecture", plan.architectureDiagram, "", "## Data Models", ...(plan.dataModels.length ? plan.dataModels.map((m) => `- ${m}`) : ["- None specified"]), "", "## Components", ...(plan.componentTree.length ? plan.componentTree.map((c) => `- ${c.name}: ${c.responsibility}${c.dependsOn.length ? ` (depends on: ${c.dependsOn.join(", ")})` : ""}`) : ["- None specified"]), "", "## Execution Waves"];
+  const lines: string[] = [
+    "# morph Pre-Work Specification Review",
+    "",
+    "Review this specification before WORK starts. Edit anything that needs clarification, scope adjustment, or constraints.",
+    "The final text saved from this editor is passed to implementation and review agents as human-approved guidance.",
+    "",
+  ];
+
+  if (spark) {
+    lines.push(
+      "## Product Intent",
+      spark.visionStatement,
+      "",
+      "### Core Features",
+      ...spark.coreFeatures.map((feature) => `- ${feature}`),
+      "",
+      "### Success Criteria",
+      ...(spark.successCriteria.length ? spark.successCriteria.map((item) => `- ${item}`) : ["- Not specified"]),
+      "",
+      "### Constraints",
+      ...(spark.constraints.length ? spark.constraints.map((item) => `- ${item}`) : ["- None specified"]),
+      ""
+    );
+  }
+
+  lines.push(
+    "## Architecture",
+    plan.architectureDiagram,
+    "",
+    "## Data Models",
+    ...(plan.dataModels.length ? plan.dataModels.map((m) => `- ${m}`) : ["- None specified"]),
+    "",
+    "## Components",
+    ...(plan.componentTree.length ? plan.componentTree.map((c) => `- ${c.name}: ${c.responsibility}${c.dependsOn.length ? ` (depends on: ${c.dependsOn.join(", ")})` : ""}`) : ["- None specified"]),
+    "",
+    "## Execution Waves"
+  );
+
   for (let i = 0; i < waves.length; i++) {
     lines.push("", `### Wave ${i + 1}`);
     for (const task of waves[i]) lines.push(`- [${task.id}] ${task.description}`, `  - Category: ${task.category}`, `  - Complexity: ${task.estimatedComplexity}`, `  - Depends on: ${task.dependsOn.length ? task.dependsOn.join(", ") : "none"}`, `  - Acceptance: ${task.acceptanceCriteria}`);
   }
+
   lines.push("", "## QA Strategy", plan.qaStrategy, "", "## Risk Mitigations", ...(plan.riskMitigations.length ? plan.riskMitigations.map((r) => `- ${r}`) : ["- None specified"]), "", "## Human Adjustments / Approval Notes", plan.humanReviewNotes || "Approved as written.");
   return lines.join("\n");
 }
 
-function buildWorkSpecHtml(plan: PlanOutput, markdown: string): string {
+function renderHtmlList(items: string[], fallback: string): string {
+  const values = items.length ? items : [fallback];
+  return `<ul>${values.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
+}
+
+function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutput): string {
   const taskRows = plan.tasks.map((task) => `<tr><td><code>${escapeHtml(task.id)}</code></td><td>${escapeHtml(task.description)}</td><td>${escapeHtml(task.category)}</td><td>${escapeHtml(task.estimatedComplexity)}</td><td>${escapeHtml(task.dependsOn.join(", ") || "none")}</td><td>${escapeHtml(task.acceptanceCriteria)}</td></tr>`).join("\n");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>morph Work Specification Review</title><style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:40px auto;color:#1f2937;line-height:1.55;padding:0 24px}h1{border-bottom:4px solid #6366f1;padding-bottom:12px}h2{margin-top:32px;border-left:6px solid #6366f1;padding-left:12px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{border:1px solid #e5e7eb;padding:8px 10px;vertical-align:top}th{background:#f9fafb}pre{background:#f3f4f6;padding:16px;border-radius:8px;overflow-x:auto}code{background:#eef2ff;padding:2px 5px;border-radius:5px}.notice{border-left:6px solid #f59e0b;background:#fffbeb;padding:14px 16px;border-radius:8px}.metric{display:inline-block;padding:4px 10px;margin-right:8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700}</style></head><body><h1>morph Work Specification Review</h1><div class="notice"><strong>Final gate before WORK:</strong> review this document, then use the pi editor popup to approve or edit the implementation spec. Edits are passed to the Engineer and Peer Reviewer agents.</div><p><span class="metric">${plan.tasks.length} tasks</span><span class="metric">${waveGroups(plan.tasks).length} waves</span><span class="metric">${escapeHtml(plan.estimatedEffort)}</span></p><h2>Architecture</h2><pre>${escapeHtml(plan.architectureDiagram)}</pre><h2>Task DAG</h2><table><thead><tr><th>ID</th><th>Description</th><th>Category</th><th>Complexity</th><th>Dependencies</th><th>Acceptance</th></tr></thead><tbody>${taskRows}</tbody></table><h2>QA Strategy</h2><pre>${escapeHtml(plan.qaStrategy)}</pre><h2>Editable Specification Snapshot</h2><pre>${escapeHtml(markdown)}</pre></body></html>`;
+  const waveCards = waveGroups(plan.tasks).map((wave, index) => `
+    <section class="wave">
+      <h3>Wave ${index + 1}</h3>
+      <ol>${wave.map((task) => `<li><strong>${escapeHtml(task.id)}</strong> ${escapeHtml(task.description)}</li>`).join("")}</ol>
+    </section>`).join("");
+  const productIntent = spark
+    ? `<section class="hero-grid">
+        <div class="panel">
+          <h2>What we are building</h2>
+          <p>${escapeHtml(spark.visionStatement)}</p>
+        </div>
+        <div class="panel">
+          <h2>Success criteria</h2>
+          ${renderHtmlList(spark.successCriteria, "No explicit success criteria captured.")}
+        </div>
+      </section>
+      <section class="split">
+        <div class="panel">
+          <h2>Core features</h2>
+          ${renderHtmlList(spark.coreFeatures, "No features captured.")}
+        </div>
+        <div class="panel">
+          <h2>Constraints</h2>
+          ${renderHtmlList(spark.constraints, "No hard constraints captured.")}
+        </div>
+      </section>`
+    : "";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>morph Work Approval</title>
+  <style>
+    :root{color-scheme:light;--ink:#172033;--muted:#5b6475;--line:#dbe2ee;--paper:#f7f9fc;--card:#fff;--accent-soft:#eef1ff;--warn:#fff7ed;--warn-line:#fb923c;--ok:#0f766e}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55}
+    main{max-width:1180px;margin:0 auto;padding:36px 24px 56px}
+    header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:24px}
+    h1{font-size:2rem;line-height:1.1;margin:0 0 8px}h2{font-size:1rem;margin:0 0 10px}h3{margin:0 0 8px}
+    .eyebrow{letter-spacing:.08em;text-transform:uppercase;font-size:.72rem;color:var(--muted);font-weight:700}
+    .subtle{color:var(--muted);margin:0}.metrics{display:flex;gap:10px;flex-wrap:wrap}
+    .metric{background:var(--accent-soft);color:#3343bf;padding:8px 12px;border-radius:999px;font-weight:700;font-size:.9rem}
+    .notice{background:var(--warn);border-left:4px solid var(--warn-line);padding:16px 18px;border-radius:14px;margin:18px 0 22px}
+    .hero-grid,.split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}
+    .panel,.wave,.spec{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+    .wave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
+    table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
+    th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-size:.92rem}
+    th{background:#f2f5fb;color:#334155}tr:last-child td{border-bottom:0}
+    pre{margin:0;background:#0f172a;color:#e2e8f0;padding:16px;border-radius:14px;overflow:auto}
+    code{background:#eef2ff;padding:2px 5px;border-radius:6px}
+    .actions{position:sticky;bottom:16px;margin-top:24px;display:flex;gap:12px;align-items:center;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:18px;padding:14px 16px}
+    button{border:0;border-radius:12px;padding:12px 16px;font:inherit;font-weight:700;cursor:pointer}
+    .approve{background:var(--ok);color:white}.pause{background:#e2e8f0;color:#334155}
+    #browser-status{color:var(--muted);font-size:.92rem}
+    @media(max-width:800px){header,.hero-grid,.split{display:block}.metrics{margin-top:16px}.panel{margin-top:16px}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">morph approval gate</div>
+        <h1>Pre-work specification review</h1>
+        <p class="subtle">Final human checkpoint before implementation begins.</p>
+      </div>
+      <div class="metrics">
+        <span class="metric">${plan.tasks.length} tasks</span>
+        <span class="metric">${waveGroups(plan.tasks).length} waves</span>
+        <span class="metric">${escapeHtml(plan.estimatedEffort)}</span>
+      </div>
+    </header>
+    <div class="notice"><strong>Approval meaning:</strong> the implementation plan below is ready to hand to the Engineer and Peer Reviewer agents. Use the pi editor if you want to change the spec; approve here only when the plan is ready as shown.</div>
+    ${productIntent}
+    <section class="panel">
+      <h2>Architecture</h2>
+      <pre>${escapeHtml(plan.architectureDiagram)}</pre>
+    </section>
+    <section>
+      <h2>Execution waves</h2>
+      <div class="wave-grid">${waveCards}</div>
+    </section>
+    <section class="panel">
+      <h2>Task DAG</h2>
+      <table><thead><tr><th>ID</th><th>Description</th><th>Category</th><th>Complexity</th><th>Dependencies</th><th>Acceptance</th></tr></thead><tbody>${taskRows}</tbody></table>
+    </section>
+    <section class="split">
+      <div class="panel">
+        <h2>QA strategy</h2>
+        <p>${escapeHtml(plan.qaStrategy)}</p>
+      </div>
+      <div class="panel">
+        <h2>Risk mitigations</h2>
+        ${renderHtmlList(plan.riskMitigations, "No explicit mitigations captured.")}
+      </div>
+    </section>
+    <section class="spec">
+      <h2>Approved spec snapshot</h2>
+      <pre>${escapeHtml(markdown)}</pre>
+    </section>
+    <div class="actions">
+      <button class="approve" onclick="sendDecision('approve')">Approve &amp; start WORK</button>
+      <button class="pause" onclick="sendDecision('reject')">Pause pipeline</button>
+      <span id="browser-status">You can also approve from the pi session.</span>
+    </div>
+  </main>
+  <script>
+    async function sendDecision(decision) {
+      const status = document.getElementById('browser-status');
+      status.textContent = decision === 'approve' ? 'Sending approval…' : 'Pausing pipeline…';
+      try {
+        await fetch('http://localhost:4040/api/' + decision, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ phase: 'pre-work' })
+        });
+        status.textContent = decision === 'approve'
+          ? 'Approved in browser. WORK will begin in the pi session.'
+          : 'Pipeline paused from browser.';
+      } catch (err) {
+        status.textContent = 'Could not reach morph Mission Control on localhost:4040.';
+      }
+    }
+  </script>
+</body>
+</html>`;
 }
 
 function openFileInBrowser(filePath: string): void {
@@ -89,13 +259,308 @@ function openFileInBrowser(filePath: string): void {
   else spawn("xdg-open", [absolute], { detached: true, stdio: "ignore" }).unref();
 }
 
+function hasProjectMarker(dir: string): boolean {
+  return [
+    "package.json",
+    "pyproject.toml",
+    "requirements.txt",
+    "Cargo.toml",
+    "go.mod",
+    "index.html",
+  ].some((file) => fs.existsSync(path.join(dir, file)));
+}
+
+function inferProjectRoot(state: ReturnType<Blackboard["getState"]>, cwd: string): {
+  absolutePath: string;
+  relativePath: string;
+  reason: string;
+} {
+  const targetDirs = (state.planOutput?.tasks ?? [])
+    .map((task) => task.targetDir)
+    .filter((dir): dir is string => Boolean(dir));
+  const counts = new Map<string, number>();
+  for (const dir of targetDirs) counts.set(dir, (counts.get(dir) ?? 0) + 1);
+
+  const rankedTargets = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([dir]) => dir);
+
+  for (const dir of rankedTargets) {
+    const absolute = path.resolve(cwd, dir);
+    if (fs.existsSync(absolute) && hasProjectMarker(absolute)) {
+      return {
+        absolutePath: absolute,
+        relativePath: dir,
+        reason: "Most planned work targeted this project directory.",
+      };
+    }
+  }
+
+  const firstLevelDirs = fs.readdirSync(cwd, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
+    .map((entry) => entry.name);
+  for (const dir of firstLevelDirs) {
+    const absolute = path.join(cwd, dir);
+    if (hasProjectMarker(absolute)) {
+      return {
+        absolutePath: absolute,
+        relativePath: dir,
+        reason: "Detected a nested project directory with runnable project files.",
+      };
+    }
+  }
+
+  return {
+    absolutePath: cwd,
+    relativePath: ".",
+    reason: "Using the repository root.",
+  };
+}
+
+function detectQuickstart(projectRoot: string, repoRoot: string): string[] {
+  const packageJsonPath = path.join(projectRoot, "package.json");
+  const relativeRoot = path.relative(repoRoot, projectRoot) || ".";
+  const maybeCd = relativeRoot === "." ? [] : [`\`cd ${relativeRoot.replace(/\\/g, "/")}\``];
+  if (fs.existsSync(packageJsonPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(packageJsonPath, "utf-8"));
+      const scripts = pkg.scripts ?? {};
+      const manager = fs.existsSync(path.join(projectRoot, "pnpm-lock.yaml"))
+        ? "pnpm"
+        : fs.existsSync(path.join(projectRoot, "yarn.lock"))
+          ? "yarn"
+          : "npm";
+      const install = manager === "yarn" ? "yarn install" : `${manager} install`;
+      const runDev = scripts.dev
+        ? manager === "npm" ? "npm run dev" : `${manager} dev`
+        : scripts.start
+          ? manager === "npm" ? "npm start" : `${manager} start`
+          : undefined;
+      const runTest = scripts.test
+        ? manager === "npm" ? "npm test" : `${manager} test`
+        : undefined;
+      return [
+        ...maybeCd,
+        `\`${install}\``,
+        ...(runDev ? [`\`${runDev}\``] : []),
+        ...(runTest ? [`\`${runTest}\` to verify the project`] : []),
+      ];
+    } catch {
+      // Fall through to generic guidance.
+    }
+  }
+
+  if (fs.existsSync(path.join(projectRoot, "pyproject.toml")) || fs.existsSync(path.join(projectRoot, "requirements.txt"))) {
+    return [
+      ...maybeCd,
+      "`python -m venv .venv`",
+      "Activate the virtual environment.",
+      fs.existsSync(path.join(projectRoot, "requirements.txt"))
+        ? "`pip install -r requirements.txt`"
+        : "`pip install -e .`",
+    ];
+  }
+
+  if (fs.existsSync(path.join(projectRoot, "index.html"))) {
+    return [
+      ...maybeCd,
+      "Open `index.html` in a browser, or serve the directory with a simple static server.",
+    ];
+  }
+
+  return [
+    ...maybeCd,
+    "Open the project directory.",
+    "Review the changed files listed below.",
+    "Use the repository README or stack-specific commands to run the project.",
+  ];
+}
+
+function buildFinalReportMarkdown(state: ReturnType<Blackboard["getState"]>, cwd: string): string {
+  const spark = state.sparkOutput;
+  const plan = state.planOutput;
+  const review = state.reviewOutput;
+  const ship = state.shipOutput;
+  const changedFiles = [...new Set(state.workResults.flatMap((result) => result.filesChanged))];
+  const completedTasks = state.workResults.filter((result) => result.status === "done");
+  const projectRoot = inferProjectRoot(state, cwd);
+  const quickstart = detectQuickstart(projectRoot.absolutePath, cwd);
+  const lines: string[] = [
+    "# morph Final Handoff Report",
+    "",
+    ship ? `**Release**: v${ship.version} — ${ship.status}` : "**Release**: not recorded",
+    "",
+    "## Overview",
+    spark?.visionStatement ?? "No product overview captured.",
+    "",
+    "## What was built",
+    ...(spark?.coreFeatures.length ? spark.coreFeatures.map((feature) => `- ${feature}`) : ["- No feature summary captured."]),
+    "",
+    "## Quickstart",
+    ...quickstart.map((step, index) => `${index + 1}. ${step}`),
+    "",
+    "## Primary deliverable",
+    `- **Project root**: \`${projectRoot.relativePath}\``,
+    `- **Why**: ${projectRoot.reason}`,
+    "",
+    "## Architecture",
+    plan?.architectureDiagram ?? "No architecture diagram captured.",
+    "",
+    "## Main components",
+    ...(plan?.componentTree.length
+      ? plan.componentTree.map((component) => `- **${component.name}** — ${component.responsibility}`)
+      : ["- No component breakdown captured."]),
+    "",
+    "## Delivered work",
+    ...(completedTasks.length
+      ? completedTasks.map((result) => `- **${result.taskId}** — ${result.summary}`)
+      : ["- No completed work results recorded."]),
+    "",
+    "## Changed files",
+    ...(changedFiles.length ? changedFiles.map((file) => `- \`${file}\``) : ["- No changed files recorded."]),
+    "",
+    "## Validation",
+    review
+      ? `Review status: **${review.status}** · efficiency score **${review.efficiencyScore}/10**`
+      : "Review output not recorded.",
+    ...(review?.testCoverageAssessment ? ["", review.testCoverageAssessment] : []),
+    "",
+    "## Release notes",
+    ship?.changelog ?? "No changelog captured.",
+    "",
+    "## Deployment checklist",
+    ...(ship?.deploymentChecklist.length
+      ? ship.deploymentChecklist.map((item) => `- [${item.done ? "x" : " "}] ${item.item}`)
+      : ["- No deployment checklist captured."]),
+    "",
+    "## Known limitations / follow-ups",
+    ...(review?.requiredChanges.length
+      ? review.requiredChanges.map((change) => `- ${change.severity}: ${change.description}`)
+      : ["- No open review findings recorded."]),
+    "",
+    ...(ship?.rollbackPlan ? ["## Rollback plan", ship.rollbackPlan, ""] : []),
+    ...(ship?.postReleaseNotes ? ["## Post-release monitoring", ship.postReleaseNotes, ""] : []),
+  ];
+  return lines.join("\n");
+}
+
+function buildFinalReportHtml(state: ReturnType<Blackboard["getState"]>, markdown: string, cwd: string): string {
+  const spark = state.sparkOutput;
+  const plan = state.planOutput;
+  const review = state.reviewOutput;
+  const ship = state.shipOutput;
+  const projectRoot = inferProjectRoot(state, cwd);
+  const quickstart = detectQuickstart(projectRoot.absolutePath, cwd);
+  const quickstartHtml = quickstart
+    .map((step) => escapeHtml(step).replace(/`([^`]+)`/g, "<code>$1</code>"));
+  const changedFiles = [...new Set(state.workResults.flatMap((result) => result.filesChanged))];
+  const completedTasks = state.workResults.filter((result) => result.status === "done");
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>morph Final Handoff Report</title>
+  <style>
+    :root{color-scheme:light;--ink:#172033;--muted:#5b6475;--line:#dbe2ee;--paper:#f7f9fc;--card:#fff;--accent:#4057f4;--accent-soft:#eef1ff;--ok:#0f766e}
+    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55}
+    main{max-width:1160px;margin:0 auto;padding:36px 24px 56px}
+    header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:22px}
+    h1{font-size:2rem;margin:0 0 8px}h2{font-size:1.1rem;margin:0 0 12px}pre{white-space:pre-wrap;margin:0}
+    .eyebrow{text-transform:uppercase;letter-spacing:.08em;font-size:.72rem;color:var(--muted);font-weight:700}
+    .metrics{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+    .metric{background:var(--accent-soft);color:#3343bf;padding:8px 12px;border-radius:999px;font-weight:700;font-size:.9rem}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    .panel{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;margin-bottom:16px}
+    .wide{grid-column:1/-1}.muted{color:var(--muted)}
+    code{background:#eef2ff;padding:2px 5px;border-radius:6px}
+    .architecture{background:#0f172a;color:#e2e8f0;padding:16px;border-radius:14px;overflow:auto}
+    .callout{border-left:4px solid var(--ok)}
+    .checklist li{list-style:none;margin-left:-1.4rem}
+    @media(max-width:800px){header,.grid{display:block}.metrics{justify-content:flex-start;margin-top:12px}.metric{display:inline-block}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="eyebrow">morph final handoff</div>
+        <h1>${spark ? escapeHtml(spark.visionStatement.slice(0, 90)) : "Completed project"}</h1>
+        <p class="muted">${ship ? `Release v${escapeHtml(ship.version)} · ${escapeHtml(ship.status)}` : "Release not recorded"}</p>
+      </div>
+      <div class="metrics">
+        <div class="metric">${completedTasks.length} completed tasks</div>
+        <div class="metric">root ${escapeHtml(projectRoot.relativePath)}</div>
+      </div>
+    </header>
+    <div class="grid">
+      <section class="panel callout wide">
+        <h2>Handoff summary</h2>
+        <p>${escapeHtml(spark?.visionStatement ?? "No product overview captured.")}</p>
+        <p class="muted">Primary deliverable: <code>${escapeHtml(projectRoot.relativePath)}</code> — ${escapeHtml(projectRoot.reason)}</p>
+      </section>
+      <section class="panel">
+        <h2>What was built</h2>
+        ${renderHtmlList(spark?.coreFeatures ?? [], "No feature summary captured.")}
+      </section>
+      <section class="panel">
+        <h2>Quickstart</h2>
+        <ol>${quickstartHtml.map((step) => `<li>${step}</li>`).join("")}</ol>
+      </section>
+      <section class="panel wide">
+        <h2>Architecture</h2>
+        <pre class="architecture">${escapeHtml(plan?.architectureDiagram ?? "No architecture diagram captured.")}</pre>
+      </section>
+      <section class="panel">
+        <h2>Main components</h2>
+        ${renderHtmlList(plan?.componentTree.map((component) => `${component.name} — ${component.responsibility}`) ?? [], "No component breakdown captured.")}
+      </section>
+      <section class="panel">
+        <h2>Validation</h2>
+        <p>${review ? `Review status: <strong>${escapeHtml(review.status)}</strong> · efficiency score <strong>${review.efficiencyScore}/10</strong>` : "Review output not recorded."}</p>
+        ${review?.testCoverageAssessment ? `<p class="muted">${escapeHtml(review.testCoverageAssessment)}</p>` : ""}
+      </section>
+      <section class="panel">
+        <h2>Delivered work</h2>
+        ${renderHtmlList(completedTasks.map((result) => `${result.taskId} — ${result.summary}`), "No completed work results recorded.")}
+      </section>
+      <section class="panel">
+        <h2>Changed files</h2>
+        ${renderHtmlList(changedFiles, "No changed files recorded.")}
+      </section>
+      <section class="panel wide">
+        <h2>Release notes</h2>
+        <pre>${escapeHtml(ship?.changelog ?? "No changelog captured.")}</pre>
+      </section>
+      <section class="panel">
+        <h2>Deployment checklist</h2>
+        <div class="checklist">${renderHtmlList(ship?.deploymentChecklist.map((item) => `${item.done ? "✓" : "○"} ${item.item}`) ?? [], "No deployment checklist captured.")}</div>
+      </section>
+      <section class="panel">
+        <h2>Known limitations / follow-ups</h2>
+        ${renderHtmlList(review?.requiredChanges.map((change) => `${change.severity}: ${change.description}`) ?? [], "No open review findings recorded.")}
+      </section>
+      ${ship?.rollbackPlan ? `<section class="panel"><h2>Rollback plan</h2><pre>${escapeHtml(ship.rollbackPlan)}</pre></section>` : ""}
+      ${ship?.postReleaseNotes ? `<section class="panel"><h2>Post-release monitoring</h2><pre>${escapeHtml(ship.postReleaseNotes)}</pre></section>` : ""}
+      <section class="panel wide">
+        <h2>Markdown snapshot</h2>
+        <pre>${escapeHtml(markdown)}</pre>
+      </section>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
 export default function (pi: ExtensionAPI) {
   // ── Shared state ──
   let blackboard: Blackboard | null = null;
   let currentAbortController: AbortController | null = null;
   let currentTick = 0;
   let animationInterval: NodeJS.Timeout | null = null;
+  let requestAnimationRender: (() => void) | null = null;
   let webServer: Server | null = null;
+  const subagentActivities = new Map<string, SubagentActivity>();
 
   function getBB(): Blackboard {
     if (!blackboard) blackboard = new Blackboard(process.cwd());
@@ -129,6 +594,53 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function ensureWebServer(): void {
+    if (!webServer) {
+      webServer = startMorphServer(getBB(), 4040);
+    }
+  }
+
+  function createBrowserDecisionWaiter(phase: string): {
+    promise: Promise<"approve" | "reject">;
+    dispose: () => void;
+  } {
+    let dispose = () => {};
+    const promise = new Promise<"approve" | "reject">((resolve) => {
+      dispose = () => {
+        serverEvents.removeListener("approve", onApprove);
+        serverEvents.removeListener("reject", onReject);
+      };
+      const onApprove = (p: string) => {
+        if (p === phase) {
+          dispose();
+          resolve("approve");
+        }
+      };
+      const onReject = (p: string) => {
+        if (p === phase) {
+          dispose();
+          resolve("reject");
+        }
+      };
+      serverEvents.on("approve", onApprove);
+      serverEvents.on("reject", onReject);
+    });
+    return { promise, dispose };
+  }
+
+  function writeFinalReportArtifacts(ctx: any): { markdownPath: string; htmlPath: string } {
+    const morphDir = getMorphDir(ctx.cwd);
+    fs.mkdirSync(morphDir, { recursive: true });
+    const state = getBB().getState();
+    const markdown = buildFinalReportMarkdown(state, ctx.cwd);
+    const html = buildFinalReportHtml(state, markdown, ctx.cwd);
+    const markdownPath = path.join(morphDir, "final-report.md");
+    const htmlPath = path.join(morphDir, "final-report.html");
+    fs.writeFileSync(markdownPath, markdown, "utf-8");
+    fs.writeFileSync(htmlPath, html, "utf-8");
+    return { markdownPath, htmlPath };
+  }
+
 
 
   async function reviewWorkSpecGate(ctx: any, planOutput: PlanOutput): Promise<boolean> {
@@ -136,20 +648,12 @@ export default function (pi: ExtensionAPI) {
     const morphDir = getMorphDir(ctx.cwd);
     fs.mkdirSync(morphDir, { recursive: true });
 
-    const markdown = buildWorkSpecMarkdown(planOutput);
-    const html = buildWorkSpecHtml(planOutput, markdown);
+    const sparkOutput = bb.getState().sparkOutput;
+    const draftMarkdown = buildWorkSpecMarkdown(planOutput, sparkOutput);
     const markdownPath = path.join(morphDir, "work-spec.md");
-    const htmlPath = path.join(morphDir, "work-preview.html");
+    const htmlPath = path.join(morphDir, "work-approval.html");
 
-    fs.writeFileSync(markdownPath, markdown, "utf-8");
-    fs.writeFileSync(htmlPath, html, "utf-8");
-    openFileInBrowser(htmlPath);
-
-    pi.sendMessage({ customType: "morph", content: `# 🧭 Pre-Work Specification Review
-
-Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification in the popup editor before WORK begins.`, display: true, details: { phase: "pre-work", htmlPath, markdownPath } });
-
-    const edited = await ctx.ui.editor("Review/edit WORK specification before implementation", markdown);
+    const edited = await ctx.ui.editor("Review/edit WORK specification before implementation", draftMarkdown);
     if (edited === undefined) {
       ctx.ui.notify("WORK paused. Re-run /morph:run or /morph:work when ready.", "info");
       return false;
@@ -158,7 +662,29 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
     fs.writeFileSync(markdownPath, edited, "utf-8");
     planOutput.humanReviewNotes = edited;
     bb.setPlanOutput(planOutput);
-    bb.recordDecision("plan", "Human reviewed pre-work specification", `Review artifact: ${htmlPath}`);
+    fs.writeFileSync(htmlPath, buildWorkSpecHtml(planOutput, edited, sparkOutput), "utf-8");
+    ensureWebServer();
+    openFileInBrowser(htmlPath);
+
+    pi.sendMessage({ customType: "morph", content: `# 🧭 Pre-Work Specification Review
+
+Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from the pi prompt to begin WORK.`, display: true, details: { phase: "pre-work", htmlPath, markdownPath } });
+
+    const browserDecision = createBrowserDecisionWaiter("pre-work");
+    const decision = await Promise.race([
+      browserDecision.promise,
+      ctx.ui.confirm(
+        "Approve WORK specification?",
+        "The final approval report is open in your browser. Continue with implementation?"
+      ).then((approved: boolean) => approved ? "approve" as const : "reject" as const),
+    ]);
+    browserDecision.dispose();
+    if (decision === "reject") {
+      ctx.ui.notify("WORK paused before implementation. Re-run /morph:run or /morph:work when ready.", "info");
+      return false;
+    }
+
+    bb.recordDecision("plan", "Human approved pre-work specification", `Approval artifact: ${htmlPath}`);
     ctx.ui.notify("Pre-work specification approved. Starting WORK...", "success" as any);
     return true;
   }
@@ -201,11 +727,18 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
       });
     }
 
+    const liveSubs = [...subagentActivities.values()].filter(
+      (activity) => activity.status === "running" || activity.status === "idle"
+    );
+
     return {
       phase: state.phase,
       tasks,
       agents,
       tokenLedger: state.tokenLedger,
+      tick: currentTick,
+      subagentActivities: liveSubs.length > 0 ? liveSubs : undefined,
+      phaseContext: buildPhaseContext(state, tasks, liveSubs),
     };
   }
 
@@ -220,16 +753,132 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
     }
   }
 
+  function clearSubagentActivity(name: string): void {
+    subagentActivities.delete(name);
+  }
+
+  function buildPhaseContext(
+    state: ReturnType<Blackboard["getState"]>,
+    tasks: TaskDisplay[],
+    liveSubs: SubagentActivity[]
+  ): PhaseContext | undefined {
+    const activeAgents = liveSubs.length;
+    const liveNames = new Set(liveSubs.map((agent) => agent.name));
+    const agentMark = (name: string) => liveNames.has(name) ? "●" : "○";
+    const compactTask = (task: TaskDisplay) =>
+      `${task.status === "done" ? "✓" : task.status === "running" ? "●" : task.status === "failed" || task.status === "blocked" ? "!" : "○"} ${task.id}`;
+    const runningTasks = tasks.filter((task) => task.status === "running");
+    const pendingTasks = tasks.filter((task) => task.status === "pending");
+    const doneTasks = tasks.filter((task) => task.status === "done");
+    const blockedTasks = tasks.filter((task) => task.status === "blocked" || task.status === "failed");
+
+    switch (state.phase) {
+      case "spark":
+        return { title: "SPARK BOARD", lines: [
+          `Visionary ${agentMark("visionary")}  ->  Critic ${agentMark("critic")}`,
+          state.sparkOutput ? `features ${state.sparkOutput.coreFeatures.length}  ·  risks ${state.sparkOutput.risks.length}` : "shaping PRD  ·  pressure-testing idea",
+          state.sparkOutput?.technicalStackRecommendation ? `stack -> ${state.sparkOutput.technicalStackRecommendation}` : "next -> synthesize final PRD",
+        ]};
+      case "plan":
+        return { title: "PLAN BOARD", lines: [
+          `Architect ${agentMark("architect")}`,
+          `QA ${agentMark("qa-expert")}  +  Efficiency ${agentMark("efficiency-mgr")}`,
+          state.planOutput ? `${state.planOutput.tasks.length} tasks  ·  ${waveGroups(state.planOutput.tasks).length} waves` : "building architecture + DAG",
+          state.planOutput ? `next -> work spec (${state.planOutput.estimatedEffort})` : "next -> specialist review",
+        ]};
+      case "work": {
+        const shownRunning = runningTasks.slice(0, 3).map(compactTask).join("   ");
+        const shownPending = pendingTasks.slice(0, 3).map(compactTask).join("   ");
+        const compactQueue = tasks.slice(0, 5).map((task) =>
+          task.status === "done" ? "✓" : task.status === "running" ? "●" : task.status === "failed" || task.status === "blocked" ? "!" : "○"
+        ).join(" ");
+        return { title: "WORK CONTROL", lines: [
+          `done ${doneTasks.length}/${tasks.length}  ·  blocked ${blockedTasks.length}`,
+          compactQueue ? `queue  ${compactQueue}` : "queue  —",
+          shownRunning ? `doing  ${shownRunning}` : "doing  —",
+          shownPending ? `next   ${shownPending}` : "next   review gate",
+          activeAgents > 0 ? `lanes  engineer ${agentMark("engineer")}  ->  reviewer ${agentMark("peer-reviewer")}` : "next -> review when queue clears",
+        ]};
+      }
+      case "review": {
+        const review = state.reviewOutput;
+        const severities = { critical: 0, major: 0, minor: 0, "nice-to-have": 0 };
+        for (const change of review?.requiredChanges ?? []) severities[change.severity]++;
+        return { title: "REVIEW BOARD", lines: [
+          `QA       ${agentMark("qa-auditor")}────┐`,
+          `PERF     ${agentMark("perf-guru")}────┼──> LEAD ${agentMark("tech-lead")}`,
+          `USER     ${agentMark("end-user")}────┘`,
+          review ? `VERDICT  ${review.status}  ·  score ${review.efficiencyScore}/10` : "VERDICT  waiting on synthesis",
+          review ? `FINDINGS ${severities.critical} critical  ${severities.major} major  ${severities.minor} minor` : `NEXT     ${activeAgents > 0 ? "auditors active" : "awaiting auditors"}`,
+        ]};
+      }
+      case "ship":
+        return { title: "SHIP BOARD", lines: [
+          `DevOps ${agentMark("devops-sre")}  ->  Release ${agentMark("release-consultant")}`,
+          state.shipOutput ? `${state.shipOutput.status}  ·  v${state.shipOutput.version}` : "preparing release package",
+          state.reviewOutput ? `review -> ${state.reviewOutput.status}` : "review -> pending",
+        ]};
+      default:
+        return undefined;
+    }
+  }
+
+  function updateSubagentEvent(agentName: string, role: string, taskId: string, event: any): void {
+    let entry = subagentActivities.get(agentName);
+    if (!entry) {
+      entry = { name: agentName, role, taskId, status: "running", currentTool: "", lastAction: "", turns: 0, toolDetail: "" };
+      subagentActivities.set(agentName, entry);
+    }
+    entry.taskId = taskId;
+    entry.status = "running";
+    switch (event.type) {
+      case "message_start":
+        entry.currentTool = "";
+        entry.lastAction = "responding...";
+        break;
+      case "text":
+        if (event.text?.trim()) entry.lastAction = event.text.trim();
+        break;
+      case "tool_use": {
+        entry.currentTool = event.name || "";
+        const args = event.input || event.args || {};
+        entry.toolDetail = typeof args === "object" ? args.path || args.filePath || args.command || args.pattern || args.query || "" : String(args).slice(0, 40);
+        break;
+      }
+      case "tool_result":
+        if (event.content?.[0]?.text) entry.lastAction = event.content[0].text.slice(0, 60).replace(/\n/g, " ");
+        break;
+      case "message_end":
+        entry.turns++;
+        entry.currentTool = "";
+        entry.lastAction = `turn ${entry.turns} complete`;
+        break;
+    }
+  }
+
   // ── Update the phase widget with colored pipeline progress ──
   function updateWidget(ctx: {
     ui: {
       setWidget: (id: string, lines: string[] | ((tui: any, theme: any) => { render: (w: number) => string[]; invalidate: () => void }), opts?: any) => void;
     };
   }) {
-    const display = buildPipelineDisplay();
+    setPipelineWidget(ctx as any, () => buildPipelineDisplay());
+  }
+
+  function setPipelineWidget(
+    ctx: {
+      ui: {
+        setWidget: (id: string, lines: string[] | ((tui: any, theme: any) => { render: (w: number) => string[]; invalidate: () => void }), opts?: any) => void;
+      };
+    },
+    getDisplay: () => PipelineDisplay
+  ) {
     ctx.ui.setWidget(
       "morph",
-      (_tui: any, theme: any) => buildPipelineProgressWidget(display, theme),
+      (tui: any, theme: any) => {
+        requestAnimationRender = () => tui.requestRender();
+        return buildPipelineProgressWidget(getDisplay, theme);
+      },
       { placement: "aboveEditor" }
     );
   }
@@ -255,7 +904,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
     if (!animationInterval) {
       animationInterval = setInterval(() => {
         currentTick++;
-        updateWidget(ctx as any);
+        requestAnimationRender?.();
       }, 100);
     }
 
@@ -267,6 +916,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
   pi.on("session_shutdown", async () => {
     if (animationInterval) clearInterval(animationInterval);
     animationInterval = null;
+    requestAnimationRender = null;
     currentAbortController?.abort();
     resetBB();
   });
@@ -357,7 +1007,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
           cwd: ctx.cwd,
           blackboard: bb,
           signal: currentAbortController.signal,
+          onAgentEvent: (agentName, role, taskId, event) => {
+            updateSubagentEvent(agentName, role, taskId, event);
+            requestAnimationRender?.();
+          },
         });
+        subagentActivities.clear();
 
         // Done
         const waves = waveGroups(planOutput.tasks);
@@ -434,11 +1089,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
       bb.transition("work");
       const display = buildPipelineDisplay();
       ctx.ui.setStatus("morph", buildStatusBar(display));
-      ctx.ui.setWidget(
-        "morph",
-        (_tui: any, theme: any) => buildPipelineProgressWidget(display, theme),
-        { placement: "aboveEditor" }
-      );
+      setPipelineWidget(ctx as any, () => buildPipelineDisplay());
       ctx.ui.notify(`Work: ${state.planOutput.tasks.length} tasks, ${waveGroups(state.planOutput.tasks).length} waves...`, "info");
 
       try {
@@ -463,14 +1114,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
           onWaveStart: async (wave, waveIndex) => {
             // Update widget: mark wave tasks as "running"
             for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
-            ctx.ui.setWidget(
-              "morph",
-              (_tui: any, theme: any) => buildPipelineProgressWidget(
-                { ...buildPipelineDisplay(), tasks: [...liveTasks.values()] },
-                theme
-              ),
-              { placement: "aboveEditor" }
-            );
+            setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
 
             const waveTasks = wave
               .map((t) => `  ○ [${t.id}] ${t.description.slice(0, 60)} (${t.estimatedComplexity})`)
@@ -490,14 +1134,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
             });
 
             // Refresh widget
-            ctx.ui.setWidget(
-              "morph",
-              (_tui: any, theme: any) => buildPipelineProgressWidget(
-                { ...buildPipelineDisplay(), tasks: [...liveTasks.values()] },
-                theme
-              ),
-              { placement: "aboveEditor" }
-            );
+            setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
 
             // Update status bar
             const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
@@ -510,19 +1147,22 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
               `${icon} [${result.taskId}] ${result.summary.slice(0, 80)}`,
               result.status === "done" ? "info" : "warning"
             );
+            clearSubagentActivity("engineer");
+            clearSubagentActivity("peer-reviewer");
+          },
+          onAgentEvent: (agentName, role, taskId, event) => {
+            updateSubagentEvent(agentName, role, taskId, event);
+            requestAnimationRender?.();
           },
         });
+        subagentActivities.clear();
 
         // All done
         const done = results.filter((r) => r.status === "done").length;
         const failed = results.filter((r) => r.status === "failed").length;
 
         ctx.ui.setStatus("morph", `morph:review (ready) ✓  ${done}/${results.length} done`);
-        ctx.ui.setWidget(
-          "morph",
-          (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
-          { placement: "aboveEditor" }
-        );
+        setPipelineWidget(ctx as any, () => buildPipelineDisplay());
 
         const progressText = formatProgress(results, state.planOutput!.tasks);
         const summary = [
@@ -578,7 +1218,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
           blackboard: bb,
           signal: currentAbortController.signal,
           focus: args || undefined,
+          onAgentEvent: (agentName, role, taskId, event) => {
+            updateSubagentEvent(agentName, role, taskId, event);
+            requestAnimationRender?.();
+          },
         });
+        subagentActivities.clear();
 
         ctx.ui.setStatus("morph", "morph:review ⏳  Tech Lead synthesizing verdict...");
 
@@ -662,20 +1307,28 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
           cwd: ctx.cwd,
           blackboard: bb,
           signal: currentAbortController.signal,
+          onAgentEvent: (agentName, role, taskId, event) => {
+            updateSubagentEvent(agentName, role, taskId, event);
+            requestAnimationRender?.();
+          },
         });
+        subagentActivities.clear();
+        const finalState = bb.getState();
+        const report = writeFinalReportArtifacts(ctx);
+        openFileInBrowser(report.htmlPath);
 
         const icon = shipOutput.status === "SHIPPED" ? "🚀" : "⛔";
         ctx.ui.setStatus("morph", `morph:done ${icon}  v${shipOutput.version}`);
         ctx.ui.setWidget("morph", ["✅  morph pipeline complete!", `   Version: ${shipOutput.version}  •  Status: ${shipOutput.status}`]);
 
         const costBreakdown = [
-          `  Spark:  ${formatTokens(state.tokenLedger?.spark || 0)}`,
-          `  Plan:   ${formatTokens(state.tokenLedger?.plan || 0)}`,
-          `  Work:   ${formatTokens(state.tokenLedger?.work || 0)}`,
-          `  Review: ${formatTokens(state.tokenLedger?.review || 0)}`,
-          `  Ship:   ${formatTokens(state.tokenLedger?.ship || 0)}`,
+          `  Spark:  ${formatTokens(finalState.tokenLedger?.spark || 0)}`,
+          `  Plan:   ${formatTokens(finalState.tokenLedger?.plan || 0)}`,
+          `  Work:   ${formatTokens(finalState.tokenLedger?.work || 0)}`,
+          `  Review: ${formatTokens(finalState.tokenLedger?.review || 0)}`,
+          `  Ship:   ${formatTokens(finalState.tokenLedger?.ship || 0)}`,
           `  ─────────────────`,
-          `  Total:  ${formatTokens(state.tokenLedger?.total || 0)} tokens`,
+          `  Total:  ${formatTokens(finalState.tokenLedger?.total || 0)} tokens`,
         ].join("\n");
 
         const summary = [
@@ -693,6 +1346,10 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
           ``,
           `**Pipeline Costs**:`,
           costBreakdown,
+          ``,
+          `**Final Handoff Report**:`,
+          `- Markdown: \`${report.markdownPath}\``,
+          `- HTML: \`${report.htmlPath}\``,
           ``,
           `🎉 Pipeline complete!`,
         ].join("\n");
@@ -742,7 +1399,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
             prompt: args,
             blackboard: bb,
             signal: currentAbortController.signal,
+            onAgentEvent: (agentName, role, taskId, event) => {
+              updateSubagentEvent(agentName, role, taskId, event);
+              requestAnimationRender?.();
+            },
           });
+          subagentActivities.clear();
           bb.setSparkOutput(sparkOutput);
           state = bb.getState();
 
@@ -800,7 +1462,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
               cwd: ctx.cwd,
               blackboard: bb,
               signal: currentAbortController.signal,
+              onAgentEvent: (agentName, role, taskId, event) => {
+                updateSubagentEvent(agentName, role, taskId, event);
+                requestAnimationRender?.();
+              },
             });
+            subagentActivities.clear();
             bb.setPlanOutput(planOutput);
             state = bb.getState();
 
@@ -869,11 +1536,7 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
 
             onWaveStart: async (wave, waveIndex) => {
               for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
-              ctx.ui.setWidget(
-                "morph",
-                (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
-                { placement: "aboveEditor" }
-              );
+              setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
 
               // Brief wave confirmation in guided mode
               const waveTasks = wave
@@ -892,19 +1555,22 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
                 ...liveTasks.get(result.taskId)!,
                 status: result.status === "done" ? "done" : result.status === "blocked" ? "blocked" : "failed",
               });
-              ctx.ui.setWidget(
-                "morph",
-                (_tui: any, theme: any) => buildPipelineProgressWidget(buildPipelineDisplay(), theme),
-                { placement: "aboveEditor" }
-              );
+              setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
               const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
               ctx.ui.setStatus("morph", `morph:run ⏳  Work: ${done}/${liveTasks.size} tasks`);
 
               const icon = result.status === "done" ? "✓" : result.status === "blocked" ? "⊘" : "✗";
               ctx.ui.notify(`${icon} [${result.taskId}] ${result.summary.slice(0, 80)}`, 
                 result.status === "done" ? "info" : "warning");
+              clearSubagentActivity("engineer");
+              clearSubagentActivity("peer-reviewer");
+            },
+            onAgentEvent: (agentName, role, taskId, event) => {
+              updateSubagentEvent(agentName, role, taskId, event);
+              requestAnimationRender?.();
             },
           });
+          subagentActivities.clear();
 
           bb.finishWork();
           state = bb.getState();
@@ -959,7 +1625,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
             cwd: ctx.cwd,
             blackboard: bb,
             signal: currentAbortController.signal,
+            onAgentEvent: (agentName, role, taskId, event) => {
+              updateSubagentEvent(agentName, role, taskId, event);
+              requestAnimationRender?.();
+            },
           });
+          subagentActivities.clear();
           bb.setReviewOutput(reviewOutput);
           state = bb.getState();
 
@@ -992,9 +1663,12 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
 
           pi.sendMessage({ customType: "morph", content: reviewSummary, display: true, details: { phase: "review" } });
 
-          const proceed = await ctx.ui.confirm(
+          ensureWebServer();
+          const proceed = await waitConfirm(
+            ctx,
             "🚀 Proceed to Ship phase?",
-            "Review approved! Review details in chat and confirm to release."
+            "Review approved! Review details in chat and confirm to release.",
+            "review"
           );
           if (!proceed) {
             ctx.ui.notify("Pipeline paused after Review. Run /morph:run to continue.", "info");
@@ -1019,13 +1693,26 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
             cwd: ctx.cwd,
             blackboard: bb,
             signal: currentAbortController.signal,
+            onAgentEvent: (agentName, role, taskId, event) => {
+              updateSubagentEvent(agentName, role, taskId, event);
+              requestAnimationRender?.();
+            },
           });
+          subagentActivities.clear();
           bb.setShipOutput(shipOutput);
           state = bb.getState();
+          const report = writeFinalReportArtifacts(ctx);
+          openFileInBrowser(report.htmlPath);
 
           ctx.ui.setStatus("morph", `morph:run 🚀  v${shipOutput.version} shipped`);
           updateWidget(ctx as any);
-          ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Pipeline complete.`, "success" as any);
+          pi.sendMessage({
+            customType: "morph",
+            content: `# 🚀 Final Handoff Report\n\nGenerated after ship:\n- Markdown: \`${report.markdownPath}\`\n- HTML: \`${report.htmlPath}\``,
+            display: true,
+            details: { phase: "ship", markdownPath: report.markdownPath, htmlPath: report.htmlPath },
+          });
+          ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Final report generated.`, "success" as any);
         } catch (err: any) {
           ctx.ui.setStatus("morph", `morph:run ✗  Ship failed: ${err.message.slice(0, 40)}`);
           ctx.ui.notify(`Ship failed: ${err.message}`, "error");

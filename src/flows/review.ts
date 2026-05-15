@@ -27,12 +27,13 @@ export interface ReviewFlowOptions {
   signal?: AbortSignal;
   /** Custom instructions for the review focus */
   focus?: string;
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
 }
 
 export async function executeReviewFlow(
   options: ReviewFlowOptions
 ): Promise<ReviewOutput> {
-  const { cwd, blackboard, signal, focus } = options;
+  const { cwd, blackboard, signal, focus, onAgentEvent } = options;
 
   const state = blackboard.getState();
   const planOutput = state.planOutput;
@@ -133,6 +134,7 @@ Be brutally honest. You're the customer, not a developer.`;
       systemPrompt: qaSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(qaAuditor.name, qaAuditor.role, "-", event),
     }),
     runAgent(perfGuru, {
       cwd,
@@ -140,6 +142,7 @@ Be brutally honest. You're the customer, not a developer.`;
       systemPrompt: perfSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(perfGuru.name, perfGuru.role, "-", event),
     }),
     runAgent(endUser, {
       cwd,
@@ -147,6 +150,7 @@ Be brutally honest. You're the customer, not a developer.`;
       systemPrompt: endUserSystemPrompt,
       signal,
       blackboard,
+      onEvent: (event) => onAgentEvent?.(endUser.name, endUser.role, "-", event),
     }),
   ]);
 
@@ -202,6 +206,7 @@ const techLeadResult = await runAgent(techLead, {
   systemPrompt: techLeadSystemPrompt,
   signal,
   blackboard,
+  onEvent: (event) => onAgentEvent?.(techLead.name, techLead.role, "-", event),
 });
 
   blackboard.addTokens(
