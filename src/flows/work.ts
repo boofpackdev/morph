@@ -29,6 +29,8 @@ import type {
   PlanOutput,
 } from "../schemas/contracts.js";
 import { generateDiff } from "../utils/diff.js";
+import * as path from "node:path";
+import { execSync } from "node:child_process";
 
 export interface WorkFlowOptions {
   cwd: string;
@@ -157,16 +159,91 @@ export async function executeWorkFlow(
   return allResults;
 }
 
+/**
+ * Auto-commit scaffold/config tasks so git checkpoint stashes don't eat them.
+ */
+function commitScaffoldResults(task: TaskNode, cwd: string): void {
+  // Only auto-commit config and scaffold-type tasks
+  const scaffoldPatterns = ["scaffold", "config", "init", "setup"];
+  const isScaffold = scaffoldPatterns.some((p) =>
+    task.id.toLowerCase().includes(p) || task.description.toLowerCase().includes(p)
+  );
+  if (!isScaffold) return;
+
+  try {
+    const repoDir = execSync("git rev-parse --show-toplevel 2>nul || echo .", {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+
+    // Add all new/untracked files (this is what the scaffold created)
+    execSync(`git add -A`, { cwd: repoDir, timeout: 10000 });
+
+    // Only commit if there's something staged
+    const status = execSync(`git status --porcelain`, {
+      cwd: repoDir,
+      encoding: "utf-8",
+      timeout: 5000,
+    }).trim();
+    if (status) {
+      execSync(`git commit -m "morph: auto-commit ${task.id} — ${task.description.slice(0, 60)}" --no-verify`, {
+        cwd: repoDir,
+        timeout: 10000,
+        stdio: "pipe",
+      });
+    }
+  } catch {
+    // Not a git repo or git unavailable — skip auto-commit silently
+  }
+}
+
+/**
+ * Build spark context for docs/reference tasks so the agent has actual content to document.
+ */
+function buildDocsContextBlock(blackboard: Blackboard): string {
+  const state = blackboard.getState();
+  if (!state.sparkOutput) return "";
+
+  const parts: string[] = ["\n\n## Project Context (from PRD/spark)"];
+  const spark = state.sparkOutput;
+
+  if (spark.coreFeatures?.length) {
+    parts.push("\n### Core Features");
+    for (const f of spark.coreFeatures) parts.push(`- ${f}`);
+  }
+  if (spark.constraints?.length) {
+    parts.push("\n### Constraints");
+    for (const c of spark.constraints) parts.push(`- ${c}`);
+  }
+  if (spark.risks?.length) {
+    parts.push("\n### Risks");
+    for (const r of spark.risks) parts.push(`- ${r}`);
+  }
+  if (spark.successCriteria?.length) {
+    parts.push("\n### Success Criteria");
+    for (const s of spark.successCriteria) parts.push(`- ${s}`);
+  }
+  if (spark.technicalStackRecommendation) {
+    parts.push(`\n### Tech Stack\n${spark.technicalStackRecommendation}`);
+  }
+
+  return parts.join("\n");
+}
+
 async function executeSingleTask(
   task: TaskNode,
   engineer: AgentConfig,
   reviewer: AgentConfig,
-  cwd: string,
+  baseCwd: string,
   blackboard: Blackboard,
   maxRetries: number,
   signal?: AbortSignal,
   onTaskComplete?: (result: WorkTaskResult) => void
 ): Promise<WorkTaskResult> {
+  // ── Fix 2: Resolve project-scoped cwd ──
+  const cwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+
   let attempt = 0;
   let lastReviewFeedback = "";
   const humanReviewNotes = blackboard.getState().planOutput?.humanReviewNotes?.trim();
@@ -178,6 +255,9 @@ Before implementation, the user reviewed/edited the work specification. Treat th
 ${humanReviewNotes}`
     : "";
 
+  // ── Fix 4: Build docs context block for documentation tasks ──
+  const docsContextBlock = task.category === "docs" ? buildDocsContextBlock(blackboard) : "";
+
   while (attempt < maxRetries) {
     attempt++;
     if (attempt > 1) {
@@ -187,6 +267,10 @@ ${humanReviewNotes}`
     // ── Engineer implements ──
     const feedbackBlock = lastReviewFeedback
       ? `\n\n## Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
+      : "";
+
+    const targetDirNote = task.targetDir
+      ? `\n\n## Target Directory\nAll file operations should be within \`${task.targetDir}\` relative to the project root.`
       : "";
 
     const engSystemPrompt = `You are the **Primary Engineer** for the morph orchestration pipeline.
@@ -200,7 +284,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${feedbackBlock}
+- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}
 
 ## Instructions
 1. Read relevant existing files first
@@ -281,6 +365,9 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
     const isApproved = /APPROVED/i.test(reviewOutput.split("\n")[0] || "");
 
     if (isApproved) {
+      // ── Fix 3: Auto-commit scaffold results so git checkpoints don't eat them ──
+      commitScaffoldResults(task, baseCwd);
+
       const result: WorkTaskResult = {
         taskId: task.id,
         status: "done",

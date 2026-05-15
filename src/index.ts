@@ -417,6 +417,20 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
       const specApproved = await reviewWorkSpecGate(ctx, state.planOutput);
       if (!specApproved) return;
 
+      // ── Fix 5: Protect untracked files from git stash checkpoints ──
+      try {
+        const { execSync } = require("node:child_process");
+        execSync(`git add -A`, { cwd: ctx.cwd, timeout: 10000, stdio: "pipe" });
+        const status = execSync(`git status --porcelain`, { cwd: ctx.cwd, encoding: "utf-8", timeout: 5000 }).trim();
+        if (status) {
+          execSync(`git stash push -m "morph: pre-work checkpoint" --include-untracked`, {
+            cwd: ctx.cwd, timeout: 10000, stdio: "pipe"
+          });
+        }
+      } catch {
+        // git unavailable — skip
+      }
+
       bb.transition("work");
       const display = buildPipelineDisplay();
       ctx.ui.setStatus("morph", buildStatusBar(display));
@@ -827,6 +841,14 @@ Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification
 
       // ── Work ──
       if (state.phase === "work") {
+        // ── Fix 5: Protect untracked files from git stash checkpoints ──
+        try {
+          const { execSync } = require("node:child_process");
+          execSync(`git add -A`, { cwd: ctx.cwd, timeout: 10000, stdio: "pipe" });
+        } catch {
+          // git unavailable — skip
+        }
+
         ctx.ui.setStatus("morph", "morph:run ⏳  Work phase...");
         ctx.ui.notify("🔨 Work: executing task DAG...", "info");
         updateWidget(ctx as any);

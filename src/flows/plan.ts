@@ -190,15 +190,26 @@ Produce the final plan with these exact sections:
 [Name, responsibility, dependencies for each component]
 
 ### TASKS (DAG)
-A JSON array of task objects:
+A JSON array of task objects. Each task must be a concrete, implementable unit of work.
+CRITICAL: Do NOT include markdown headings, design notes, explanatory text, or metadata as tasks.
+Only create tasks that produce actual code, tests, configuration, or documentation changes.
+
 \`\`\`json
 [
   {
     "id": "DB-01",
-    "description": "...",
+    "description": "Create the users table schema with email, name, and timestamps",
     "category": "db",
     "dependsOn": [],
-    "acceptanceCriteria": "...",
+    "acceptanceCriteria": "Migration runs cleanly; schema has all required columns with correct types",
+    "estimatedComplexity": "low"
+  },
+  {
+    "id": "API-01",
+    "description": "Implement POST /api/users endpoint with input validation",
+    "category": "api",
+    "dependsOn": ["DB-01"],
+    "acceptanceCriteria": "Can create a user via POST; returns 201 with user object; returns 400 on invalid input",
     "estimatedComplexity": "medium"
   }
 ]
@@ -214,7 +225,7 @@ A JSON array of task objects:
 One of: hours | days | weeks
 
 Make sure the task DAG is complete and all dependencies are correct.
-Every component must have tasks. Every dependency must reference a real task ID.
+Every component must have corresponding tasks. Every dependency must reference a real task ID.
 Tasks must form a valid DAG (no cycles).`;
 
   const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaResultActual.output}\n\nEfficiency feedback:\n${effResultActual.output}\n\nSynthesize the FINAL plan.`;
@@ -289,43 +300,163 @@ function buildPrdContext(spark: NonNullable<ReturnType<Blackboard["getState"]>["
   ].join("\n");
 }
 
-function parseTasks(text: string): TaskNode[] {
-  // Try to extract JSON array from markdown code block
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)\s*```/);
-  if (jsonMatch) {
+/**
+ * Attempt to extract and parse a JSON array of tasks from the AI output.
+ * Tries multiple patterns and cleans common formatting issues.
+ */
+function tryExtractJsonTasks(text: string): TaskNode[] | null {
+  // Pattern 1: Standard ```json ... ``` code block, also ```...``` unlabeled
+  const patterns = [
+    /```json\s*([\s\S]*?)```/,
+    /```\s*([\s\S]*?)```/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+
+    let jsonStr = match[1] || match[0];
+
+    // Clean the JSON string
+    // 1. Remove leading/trailing non-JSON content
+    jsonStr = jsonStr.trim();
+    // Find the first [ and last ]
+    const firstBracket = jsonStr.indexOf("[");
+    const lastBracket = jsonStr.lastIndexOf("]");
+    if (firstBracket === -1 || lastBracket === -1 || lastBracket <= firstBracket) continue;
+    jsonStr = jsonStr.slice(firstBracket, lastBracket + 1);
+
+    // 2. Remove trailing commas before ] or }
+    jsonStr = jsonStr.replace(/,([\s\r\n]*[}\]])/g, "$1");
+
+    // 3. Fix unquoted keys (common AI mistake)
+    jsonStr = jsonStr.replace(/([{,]\s*)(\w+)(\s*:)/g, '$1"$2"$3');
+
     try {
-      return JSON.parse(jsonMatch[1]);
+      const parsed = JSON.parse(jsonStr);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as TaskNode[];
+      }
     } catch {
-      // Fall through to manual parsing
+      continue;
     }
   }
+  return null;
+}
 
-  // Fallback: look for task-like lines
+/**
+ * Patterns that indicate a line is NOT a real task (markdown fluff, metadata, etc.)
+ */
+const NON_TASK_PATTERNS = [
+  /^--+$/,                    // Just dashes
+  /^\*[^*:]+:\*\*?/,        // Design notes like "*Key design decisions:**"
+  /^\*\*[A-Z][a-z]+:\*\*/, // "**Complexity:**", "**Dependencies:**"
+  /^~[^~]+~$/,                // Tilde-wrapped notes "~50 tasks...~"
+  /^\(Updated\)/i,          // "(Updated)"
+  /^Savings from original/i,  // Efficiency savings notes
+  /^\d+-\d+ tasks?/,        // "47 tasks..." summary lines
+  /^~\d+/,                    // Lines starting with "~" and a number (effort estimates)
+];
+
+/**
+ * Check if a description looks like a real, implementable task.
+ * Real tasks describe concrete changes (code, tests, config, docs, infra).
+ */
+function isRealTask(description: string): boolean {
+  const trimmed = description.trim();
+
+  // Reject empty/trivial
+  if (!trimmed || trimmed === "--" || trimmed.length < 3) return false;
+
+  // Reject markdown metadata patterns
+  for (const pat of NON_TASK_PATTERNS) {
+    if (pat.test(trimmed)) return false;
+  }
+
+  // Accept if it looks like a concrete action
+  const actionPatterns = [
+    /^(Create|Implement|Add|Build|Set up|Configure|Write|Refactor|Move|Inline|Extract|Remove|Delete|Replace|Migrate|Update|Fix)/i,
+    /^(Render|Fetch|Handle|Validate|Transform|Export|Import|Deploy|Test|Document)/i,
+    /`[^`]+`\s*→/,           // "`File.svelte` → inline in..."
+    /`[^`]+`\s+(component|file|module|class|function)/i,
+  ];
+
+  for (const pat of actionPatterns) {
+    if (pat.test(trimmed)) return true;
+  }
+
+  // If it has backtick references to files or implementations, likely real
+  if (trimmed.includes("`") && trimmed.length > 10) return true;
+
+  return false;
+}
+
+function parseTasks(text: string): TaskNode[] {
+  // PRIORITY 1: Try to extract proper JSON array of tasks
+  const jsonTasks = tryExtractJsonTasks(text);
+  if (jsonTasks) return jsonTasks;
+
+  // PRIORITY 2: Fallback — look for task-like lines, filtering out non-tasks
   const tasks: TaskNode[] = [];
   const lines = text.split("\n");
   let currentTask: Partial<TaskNode> | null = null;
+  let insideTaskSection = false;
 
   for (const line of lines) {
-    const taskMatch = line.match(
-      /^[-*]\s*(?:\[([^\]]+)\]\s*)?(.+)$/
-    );
-    if (taskMatch) {
-      if (currentTask && currentTask.id) {
-        tasks.push(currentTask as TaskNode);
-      }
-      const id = taskMatch[1] || `TASK-${String(tasks.length + 1).padStart(2, "0")}`;
-      currentTask = {
-        id,
-        description: taskMatch[2].trim(),
-        category: "other",
-        dependsOn: [],
-        acceptanceCriteria: "",
-        estimatedComplexity: "medium",
-      };
+    const trimmed = line.trim();
+
+    // Detect the TASKS section
+    if (/^###\s*TASKS/i.test(trimmed)) {
+      insideTaskSection = true;
+      continue;
     }
+    // End of TASKS section when we hit another heading
+    if (insideTaskSection && /^###\s/.test(trimmed)) {
+      insideTaskSection = false;
+    }
+
+    // Only parse bullet points
+    const taskMatch = trimmed.match(/^[-*]\s*(?:\[([^\]]+)\]\s*)?(.+)$/);
+    if (!taskMatch) continue;
+
+    const description = taskMatch[2].trim();
+
+    // Skip non-task lines
+    if (!isRealTask(description) && !insideTaskSection) continue;
+    if (!isRealTask(description) && insideTaskSection) {
+      // Inside TASKS section, still filter out obvious garbage patterns
+      if (description === "--" || description.length < 3) continue;
+      let isGarbage = false;
+      for (const pat of NON_TASK_PATTERNS) {
+        if (pat.test(description)) { isGarbage = true; break; }
+      }
+      if (isGarbage) continue;
+    }
+
+    // Push previous task if we have one
+    if (currentTask && currentTask.id && currentTask.description) {
+      tasks.push(currentTask as TaskNode);
+    }
+
+    const id = taskMatch[1] || `TASK-${String(tasks.length + 1).padStart(2, "0")}`;
+    currentTask = {
+      id,
+      description,
+      category: "other",
+      dependsOn: [],
+      acceptanceCriteria: "",
+      estimatedComplexity: "medium",
+    };
   }
-  if (currentTask && currentTask.id) {
+
+  // Push the last task
+  if (currentTask && currentTask.id && currentTask.description) {
     tasks.push(currentTask as TaskNode);
+  }
+
+  // If we got no tasks at all, create a sensible default
+  if (tasks.length === 0) {
+    tasks.push(createDefaultTask());
   }
 
   return tasks;

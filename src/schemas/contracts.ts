@@ -28,6 +28,10 @@ export const TaskNodeSchema = z.object({
     .array(z.string())
     .optional()
     .describe("Expected files this task produces/changes"),
+  targetDir: z
+    .string()
+    .optional()
+    .describe("Subdirectory to work in (relative to project root). E.g. 'packages/client' or 'portfolio'"),
 });
 
 export type TaskNode = z.infer<typeof TaskNodeSchema>;
