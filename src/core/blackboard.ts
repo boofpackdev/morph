@@ -126,7 +126,16 @@ export class Blackboard {
     const tmpPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
     const payload = JSON.stringify(this.state, null, 2) + "\n";
     fs.writeFileSync(tmpPath, payload, "utf-8");
-    fs.renameSync(tmpPath, statePath);
+    try {
+      fs.renameSync(tmpPath, statePath);
+    } catch (err: any) {
+      if (err.code === "EPERM" || err.code === "EBUSY") {
+        fs.writeFileSync(statePath, payload, "utf-8");
+        try { fs.unlinkSync(tmpPath); } catch { /* cleanup */ }
+      } else {
+        throw err;
+      }
+    }
     this.notify();
   }
 
