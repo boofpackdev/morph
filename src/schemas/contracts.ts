@@ -93,6 +93,10 @@ export const PlanOutputSchema = z.object({
   estimatedEffort: z
     .enum(["hours", "days", "weeks"])
     .describe("Rough effort estimate"),
+  humanReviewNotes: z
+    .string()
+    .optional()
+    .describe("Human-approved/edited pre-work specification passed to implementation agents"),
 });
 
 export type PlanOutput = z.infer<typeof PlanOutputSchema>;

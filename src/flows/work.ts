@@ -169,6 +169,14 @@ async function executeSingleTask(
 ): Promise<WorkTaskResult> {
   let attempt = 0;
   let lastReviewFeedback = "";
+  const humanReviewNotes = blackboard.getState().planOutput?.humanReviewNotes?.trim();
+  const humanReviewBlock = humanReviewNotes
+    ? `
+
+## Human-Reviewed Work Spec
+Before implementation, the user reviewed/edited the work specification. Treat this as authoritative guidance:
+${humanReviewNotes}`
+    : "";
 
   while (attempt < maxRetries) {
     attempt++;
@@ -192,7 +200,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}${feedbackBlock}
+- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${feedbackBlock}
 
 ## Instructions
 1. Read relevant existing files first
@@ -254,7 +262,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
 ## Task
 - ID: ${task.id}
 - Description: ${task.description}
-- Acceptance Criteria: ${task.acceptanceCriteria}`;
+- Acceptance Criteria: ${task.acceptanceCriteria}${humanReviewBlock}`;
 
     const revResult = await runAgent(reviewer, {
       cwd,

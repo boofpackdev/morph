@@ -79,6 +79,7 @@ The Plan phase outputs a Directed Acyclic Graph of tasks. The Work phase execute
 
 ### Human-in-the-Loop
 - **Post-Spark**: PRD shown for approval before Plan
+- **Pre-Work Specification Review Gate**: before Work begins, morph writes `.morph/work-preview.html`, opens it in the browser, and shows a popup editor where you can approve or edit the implementation spec. The saved notes are passed to Engineer and Peer Reviewer agents.
 - **Per-Wave**: Each work wave requires confirmation
 - **Ctrl+C**: Graceful abort with state preservation
 
