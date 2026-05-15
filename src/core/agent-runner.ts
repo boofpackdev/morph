@@ -265,8 +265,10 @@ export async function runAgent(
   } = options;
 
   const bbConfig = options.blackboard?.getState()?.config || {};
-  const provider = bbConfig.provider || options.provider || config.provider || "anthropic";
-  const model = bbConfig.model || options.model || config.model || "claude-sonnet-4-5";
+  // Prefer explicit morph/parent-session config. If unset, omit provider/model
+  // flags so the spawned pi subprocess uses the user's configured default.
+  const provider = bbConfig.provider || options.provider;
+  const model = bbConfig.model || options.model;
   const tools = options.tools || config.tools;
   const thinkingLevel = options.thinkingLevel || config.thinkingLevel || "off";
 
@@ -284,7 +286,7 @@ export async function runAgent(
       cost: 0,
       turns: 0,
     },
-    model,
+    model: model || config.model,
     stderr: "",
   };
 
@@ -294,13 +296,12 @@ export async function runAgent(
     "json",
     "-p",
     "--no-session",
-    "--provider",
-    provider,
-    "--model",
-    model,
     "--thinking",
     thinkingLevel,
   ];
+
+  if (provider) args.push("--provider", provider);
+  if (model) args.push("--model", model);
 
   if (tools && tools.length > 0) {
     args.push("--tools", tools.join(","));

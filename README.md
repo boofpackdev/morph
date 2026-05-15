@@ -8,7 +8,7 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 
 | Phase | Command | Team | Output |
 |-------|---------|------|--------|
-| **Spark** | `/morph:spark <idea>` | Visionary + Critic (2) | Refined PRD |
+| **Spark** | `/morph:run <idea>` (start) | Visionary + Critic (2) | Refined PRD |
 | **Plan** | `/morph:plan` | Architect + QA + Efficiency (3) | Architecture + Task DAG |
 | **Work** | `/morph:work` | Engineer + Reviewer per task (2) | Code Artifacts |
 | **Review** | `/morph:review` | Tech Lead + QA + Perf + User (4) | Approval/Reject Report |
@@ -43,8 +43,7 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 
 | Command | Description |
 |---------|-------------|
-| `/morph:run <idea>` | **Guided pipeline** — runs all 5 phases with review gates between each |
-| `/morph:spark <idea>` | Start a new pipeline — refine idea into PRD |
+| `/morph:run <idea>` | **Start/continue guided pipeline** — runs all 5 phases with review gates between each |
 | `/morph:plan` | Create architecture plan from PRD |
 | `/morph:work` | Execute task DAG (pauses per wave for approval) |
 | `/morph:review` | Audit implementation with 4 reviewers |
@@ -58,7 +57,7 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 | Shortcut | Action |
 |----------|--------|
 | `Ctrl+M G` | **Guided run** — full pipeline with review gates |
-| `Ctrl+M S` | Spark — refine idea (uses editor text as input) |
+| `Ctrl+M S` | Start guided run (uses editor text as input) |
 | `Ctrl+M P` | Plan — create architecture |
 | `Ctrl+M W` | Work — execute tasks |
 | `Ctrl+M R` | Review — audit implementation |
@@ -94,17 +93,6 @@ pi install /path/to/morph
 ```
 
 State is saved to `.morph/state.json` in your working directory.
-
-## Prompt Templates
-
-morph includes prompt templates for quick access:
-
-- `/pipeline <idea>` — Full pipeline walkthrough
-- `/spark <idea>` — Spark phase only
-- `/plan` — Plan phase
-- `/work` — Work phase
-- `/review` — Review phase
-- `/ship` — Ship phase
 
 ## Standalone CLI
 

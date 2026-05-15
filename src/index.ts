@@ -7,9 +7,10 @@
  * agent activity, and token costs during execution.
  */
 
+import * as fs from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Blackboard } from "./core/blackboard.js";
+import { Blackboard, getMorphDir } from "./core/blackboard.js";
 import { formatDAG, formatProgress, waveGroups, estimatePhaseTokens } from "./core/engine.js";
 import { formatTokens } from "./core/tokenizer.js";
 import { executeSparkFlow } from "./flows/spark.js";
@@ -74,6 +75,27 @@ export default function (pi: ExtensionAPI) {
     blackboard = null;
     currentAbortController?.abort();
     currentAbortController = null;
+  }
+
+  function deletePipelineState(cwd: string): void {
+    currentAbortController?.abort();
+    currentAbortController = null;
+    blackboard = null;
+    fs.rmSync(getMorphDir(cwd), { recursive: true, force: true });
+  }
+
+  function ensureDefaultModelConfig(ctx: any): void {
+    const bb = getBB();
+    const state = bb.getState();
+    if (state.config?.provider || state.config?.model) return;
+
+    const model = ctx.model;
+    if (model?.provider || model?.id) {
+      bb.setConfig({
+        provider: model.provider ? String(model.provider) : undefined,
+        model: model.id ? String(model.id) : undefined,
+      });
+    }
   }
 
   // ── Build display state from blackboard ──
@@ -152,15 +174,8 @@ export default function (pi: ExtensionAPI) {
     const bb = getBB();
     const state = bb.getState();
 
-    // Default to the parent's model if no config is set
-    if (!state.config?.provider && !state.config?.model) {
-      if (typeof (ctx as any).getModel === 'function') {
-        const model = (ctx as any).getModel();
-        if (model) {
-          bb.setConfig({ provider: model.provider as string, model: model.id });
-        }
-      }
-    }
+    // Default to the parent session's active model if no morph config is set.
+    ensureDefaultModelConfig(ctx as any);
 
     if (state.phase !== "idle") {
       ctx.ui.notify(
@@ -197,7 +212,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (ctx) => {
       const text = ctx.ui.getEditorText?.() || "";
       if (text.trim()) {
-        ctx.ui.setEditorText?.(`/morph:spark ${text}`);
+        ctx.ui.setEditorText?.(`/morph:run ${text}`);
       } else {
         ctx.ui.notify("Type your idea first, then Ctrl+M S", "info");
       }
@@ -245,17 +260,6 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ═══════════════════════════════════════════
-  // SPARK
-  // ═══════════════════════════════════════════
-  pi.registerCommand("morph:spark", {
-    description: "Spark: start a new idea (shorthand for /morph:run)",
-    handler: async (args, ctx) => {
-      // Just delegate to morph:run for consistency
-      return (pi as any).executeCommand("morph:run", args, ctx);
-    },
-  });
-
-  // ═══════════════════════════════════════════
   // PLAN
   // ═══════════════════════════════════════════
   pi.registerCommand("morph:plan", {
@@ -265,7 +269,7 @@ export default function (pi: ExtensionAPI) {
       const state = bb.getState();
 
       if (!state.sparkOutput) {
-        ctx.ui.notify("No spark output. Run /morph:spark <idea> first.", "error");
+        ctx.ui.notify("No spark output. Run /morph:run <idea> first.", "error");
         return;
       }
 
@@ -472,7 +476,7 @@ export default function (pi: ExtensionAPI) {
       const state = bb.getState();
 
       if (!state.planOutput) {
-        ctx.ui.notify("No plan output. Run /morph:spark and /morph:plan first.", "error");
+        ctx.ui.notify("No plan output. Run /morph:run <idea> and /morph:plan first.", "error");
         return;
       }
 
@@ -984,8 +988,8 @@ export default function (pi: ExtensionAPI) {
       const state = bb.getState();
 
       if (state.phase === "idle") {
-        ctx.ui.notify("morph: idle — /morph:spark <idea> to begin", "info");
-        ctx.ui.setWidget("morph", ["○  morph — Ready", "   /morph:spark <idea> to begin"]);
+        ctx.ui.notify("morph: idle — /morph:run <idea> to begin", "info");
+        ctx.ui.setWidget("morph", ["○  morph — Ready", "   /morph:run <idea> to begin"]);
         return;
       }
 
@@ -1001,22 +1005,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("morph:reset", {
-    description: "Reset pipeline (full or to a phase: idle/spark/plan/work/review)",
+    description: "Reset pipeline (full or to a phase: idle/plan/work/review)",
     handler: async (args, ctx) => {
       const phase = args?.trim().toLowerCase() || "full";
 
       if (phase === "full") {
-        const ok = await ctx.ui.confirm("Reset entire morph pipeline?", "All state in .morph/ will be cleared.");
+        const ok = await ctx.ui.confirm("Reset entire morph pipeline?", "All state in .morph/ will be deleted.");
         if (!ok) return;
-        resetBB();
+        deletePipelineState(ctx.cwd);
         ctx.ui.setStatus("morph", undefined);
         ctx.ui.setWidget("morph", undefined);
-        ctx.ui.notify("Pipeline reset.", "info");
+        ctx.ui.notify("Pipeline reset; .morph state deleted.", "info");
         return;
       }
 
       const bb = getBB();
-      const valid = ["idle", "spark", "plan", "work", "review"];
+      const valid = ["idle", "plan", "work", "review"];
       if (!valid.includes(phase)) {
         ctx.ui.notify(`Invalid phase. Use: ${valid.join(", ")} or "full"`, "error");
         return;
@@ -1025,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
       const ok = await ctx.ui.confirm(`Reset to "${phase}"?`, `All state from ${phase} onward will be cleared.`);
       if (!ok) return;
 
-      if (phase === "idle") resetBB();
+      if (phase === "idle") deletePipelineState(ctx.cwd);
       else bb.resetPhase(phase as any);
 
       ctx.ui.setStatus("morph", `morph:${bb.getState().phase}`);

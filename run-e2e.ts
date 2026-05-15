@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { executeSparkFlow } from "./src/flows/spark.js";
 import { executePlanFlow } from "./src/flows/plan.js";
 import { executeWorkFlow } from "./src/flows/work.js";
@@ -56,7 +59,9 @@ if (process.argv.includes("--mode") && process.argv.includes("json")) {
 
 // ── Orchestrator ──
 async function runTests() {
-  const cwd = process.cwd();
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "morph-e2e-"));
+
+  try {
   
   // Clean up any existing state
   const bb = new Blackboard(cwd);
@@ -96,6 +101,10 @@ async function runTests() {
   console.log("Ship completed, version:", shipOutput.version);
   
   console.log("\\n✅ ALL PHASES COMPLETED SUCCESSFULLY.");
+
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 }
 
 if (!process.argv.includes("--mode")) {
