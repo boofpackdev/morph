@@ -310,6 +310,8 @@ export async function runAgent(
   // System prompt via temp file (append mode preserves default instructions)
   let tmpDir: string | null = null;
   let tmpPath: string | null = null;
+  let taskTmpDir: string | null = null;
+  let taskTmpPath: string | null = null;
 
   try {
     options.blackboard?.addActiveAgent(config.name);
@@ -322,7 +324,16 @@ export async function runAgent(
     }
 
     args.push(...additionalArgs);
-    args.push(task);
+
+    // Write task to temp file to avoid ENAMETOOLONG on Windows (pi @file syntax)
+    try {
+      const tmp = await writeTempFile(config.name + "-task", task);
+      taskTmpDir = tmp.dir;
+      taskTmpPath = tmp.filePath;
+      args.push("@" + taskTmpPath);
+    } catch {
+      args.push(task);
+    }
 
     let wasAborted = false;
 
@@ -463,6 +474,18 @@ export async function runAgent(
     if (tmpDir)
       try {
         fs.rmdirSync(tmpDir);
+      } catch {
+        /* ignore */
+      }
+    if (taskTmpPath)
+      try {
+        fs.unlinkSync(taskTmpPath);
+      } catch {
+        /* ignore */
+      }
+    if (taskTmpDir)
+      try {
+        fs.rmdirSync(taskTmpDir);
       } catch {
         /* ignore */
       }
