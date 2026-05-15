@@ -8,6 +8,8 @@
  */
 
 import * as fs from "node:fs";
+import * as path from "node:path";
+import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Blackboard, getMorphDir } from "./core/blackboard.js";
@@ -31,6 +33,7 @@ import {
 } from "./tui/display.js";
 import { startMorphServer, serverEvents } from "./server/server.js";
 import type { Server } from "node:http";
+import type { PlanOutput } from "./schemas/contracts.js";
 
 async function waitConfirm(ctx: any, title: string, desc: string, phase: string): Promise<boolean> {
   return new Promise((resolve) => {
@@ -56,6 +59,34 @@ async function waitConfirm(ctx: any, title: string, desc: string, phase: string)
       }
     });
   });
+}
+
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function buildWorkSpecMarkdown(plan: PlanOutput): string {
+  const waves = waveGroups(plan.tasks);
+  const lines: string[] = ["# morph Pre-Work Specification Review", "", "Review this specification before WORK starts. Edit anything that needs clarification, scope adjustment, or constraints.", "The final text saved from this editor is passed to implementation and review agents as human-approved guidance.", "", "## Architecture", plan.architectureDiagram, "", "## Data Models", ...(plan.dataModels.length ? plan.dataModels.map((m) => `- ${m}`) : ["- None specified"]), "", "## Components", ...(plan.componentTree.length ? plan.componentTree.map((c) => `- ${c.name}: ${c.responsibility}${c.dependsOn.length ? ` (depends on: ${c.dependsOn.join(", ")})` : ""}`) : ["- None specified"]), "", "## Execution Waves"];
+  for (let i = 0; i < waves.length; i++) {
+    lines.push("", `### Wave ${i + 1}`);
+    for (const task of waves[i]) lines.push(`- [${task.id}] ${task.description}`, `  - Category: ${task.category}`, `  - Complexity: ${task.estimatedComplexity}`, `  - Depends on: ${task.dependsOn.length ? task.dependsOn.join(", ") : "none"}`, `  - Acceptance: ${task.acceptanceCriteria}`);
+  }
+  lines.push("", "## QA Strategy", plan.qaStrategy, "", "## Risk Mitigations", ...(plan.riskMitigations.length ? plan.riskMitigations.map((r) => `- ${r}`) : ["- None specified"]), "", "## Human Adjustments / Approval Notes", plan.humanReviewNotes || "Approved as written.");
+  return lines.join("\n");
+}
+
+function buildWorkSpecHtml(plan: PlanOutput, markdown: string): string {
+  const taskRows = plan.tasks.map((task) => `<tr><td><code>${escapeHtml(task.id)}</code></td><td>${escapeHtml(task.description)}</td><td>${escapeHtml(task.category)}</td><td>${escapeHtml(task.estimatedComplexity)}</td><td>${escapeHtml(task.dependsOn.join(", ") || "none")}</td><td>${escapeHtml(task.acceptanceCriteria)}</td></tr>`).join("\n");
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>morph Work Specification Review</title><style>body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;max-width:1180px;margin:40px auto;color:#1f2937;line-height:1.55;padding:0 24px}h1{border-bottom:4px solid #6366f1;padding-bottom:12px}h2{margin-top:32px;border-left:6px solid #6366f1;padding-left:12px}table{width:100%;border-collapse:collapse;margin:16px 0}th,td{border:1px solid #e5e7eb;padding:8px 10px;vertical-align:top}th{background:#f9fafb}pre{background:#f3f4f6;padding:16px;border-radius:8px;overflow-x:auto}code{background:#eef2ff;padding:2px 5px;border-radius:5px}.notice{border-left:6px solid #f59e0b;background:#fffbeb;padding:14px 16px;border-radius:8px}.metric{display:inline-block;padding:4px 10px;margin-right:8px;border-radius:999px;background:#eef2ff;color:#3730a3;font-weight:700}</style></head><body><h1>morph Work Specification Review</h1><div class="notice"><strong>Final gate before WORK:</strong> review this document, then use the pi editor popup to approve or edit the implementation spec. Edits are passed to the Engineer and Peer Reviewer agents.</div><p><span class="metric">${plan.tasks.length} tasks</span><span class="metric">${waveGroups(plan.tasks).length} waves</span><span class="metric">${escapeHtml(plan.estimatedEffort)}</span></p><h2>Architecture</h2><pre>${escapeHtml(plan.architectureDiagram)}</pre><h2>Task DAG</h2><table><thead><tr><th>ID</th><th>Description</th><th>Category</th><th>Complexity</th><th>Dependencies</th><th>Acceptance</th></tr></thead><tbody>${taskRows}</tbody></table><h2>QA Strategy</h2><pre>${escapeHtml(plan.qaStrategy)}</pre><h2>Editable Specification Snapshot</h2><pre>${escapeHtml(markdown)}</pre></body></html>`;
+}
+
+function openFileInBrowser(filePath: string): void {
+  const absolute = path.resolve(filePath);
+  if (process.platform === "win32") spawn("cmd.exe", ["/c", "start", "", absolute], { detached: true, stdio: "ignore" }).unref();
+  else if (process.platform === "darwin") spawn("open", [absolute], { detached: true, stdio: "ignore" }).unref();
+  else spawn("xdg-open", [absolute], { detached: true, stdio: "ignore" }).unref();
 }
 
 export default function (pi: ExtensionAPI) {
@@ -96,6 +127,40 @@ export default function (pi: ExtensionAPI) {
         model: model.id ? String(model.id) : undefined,
       });
     }
+  }
+
+
+
+  async function reviewWorkSpecGate(ctx: any, planOutput: PlanOutput): Promise<boolean> {
+    const bb = getBB();
+    const morphDir = getMorphDir(ctx.cwd);
+    fs.mkdirSync(morphDir, { recursive: true });
+
+    const markdown = buildWorkSpecMarkdown(planOutput);
+    const html = buildWorkSpecHtml(planOutput, markdown);
+    const markdownPath = path.join(morphDir, "work-spec.md");
+    const htmlPath = path.join(morphDir, "work-preview.html");
+
+    fs.writeFileSync(markdownPath, markdown, "utf-8");
+    fs.writeFileSync(htmlPath, html, "utf-8");
+    openFileInBrowser(htmlPath);
+
+    pi.sendMessage({ customType: "morph", content: `# 🧭 Pre-Work Specification Review
+
+Opened \`${htmlPath}\` for a final visual review. Edit/approve the specification in the popup editor before WORK begins.`, display: true, details: { phase: "pre-work", htmlPath, markdownPath } });
+
+    const edited = await ctx.ui.editor("Review/edit WORK specification before implementation", markdown);
+    if (edited === undefined) {
+      ctx.ui.notify("WORK paused. Re-run /morph:run or /morph:work when ready.", "info");
+      return false;
+    }
+
+    fs.writeFileSync(markdownPath, edited, "utf-8");
+    planOutput.humanReviewNotes = edited;
+    bb.setPlanOutput(planOutput);
+    bb.recordDecision("plan", "Human reviewed pre-work specification", `Review artifact: ${htmlPath}`);
+    ctx.ui.notify("Pre-work specification approved. Starting WORK...", "success" as any);
+    return true;
   }
 
   // ── Build display state from blackboard ──
@@ -348,6 +413,9 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("No plan output. Run /morph:plan first.", "error");
         return;
       }
+
+      const specApproved = await reviewWorkSpecGate(ctx, state.planOutput);
+      if (!specApproved) return;
 
       bb.transition("work");
       const display = buildPipelineDisplay();
@@ -745,14 +813,9 @@ export default function (pi: ExtensionAPI) {
 
             pi.sendMessage({ customType: "morph", content: planSummary, display: true, details: { phase: "plan" } });
 
-            const proceed = await waitConfirm(
-              ctx,
-              "🔨 Proceed to Work phase?",
-              `${planOutput.tasks.length} tasks in ${waves.length} waves. Review plan in chat and confirm.`,
-              "plan"
-            );
+            const proceed = await reviewWorkSpecGate(ctx, planOutput);
             if (!proceed) {
-              ctx.ui.notify("Pipeline paused after Plan. Run /morph:run to continue.", "info");
+              ctx.ui.notify("Pipeline paused before Work. Run /morph:run to continue.", "info");
               return;
             }
           } catch (err: any) {
