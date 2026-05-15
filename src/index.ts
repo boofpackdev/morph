@@ -28,11 +28,42 @@ import {
   buildTaskTracker,
   buildStatusBar,
 } from "./tui/display.js";
+import { startMorphServer, serverEvents } from "./server/server.js";
+import type { Server } from "node:http";
+
+async function waitConfirm(ctx: any, title: string, desc: string, phase: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let resolved = false;
+
+    // Web UI approval listener
+    const onApprove = (p: string) => {
+      if (p === phase && !resolved) {
+        resolved = true;
+        serverEvents.removeListener("approve", onApprove);
+        ctx.ui.notify(`✅ Approved via Web UI`, "success" as any);
+        resolve(true);
+      }
+    };
+    serverEvents.on("approve", onApprove);
+
+    // Terminal confirmation
+    ctx.ui.confirm(title, desc).then((proceed: boolean) => {
+      if (!resolved) {
+        resolved = true;
+        serverEvents.removeListener("approve", onApprove);
+        resolve(proceed);
+      }
+    });
+  });
+}
 
 export default function (pi: ExtensionAPI) {
   // ── Shared state ──
   let blackboard: Blackboard | null = null;
   let currentAbortController: AbortController | null = null;
+  let currentTick = 0;
+  let animationInterval: NodeJS.Timeout | null = null;
+  let webServer: Server | null = null;
 
   function getBB(): Blackboard {
     if (!blackboard) blackboard = new Blackboard(process.cwd());
@@ -54,9 +85,8 @@ export default function (pi: ExtensionAPI) {
 
     // Build task list from plan + work results
     if (state.planOutput) {
-      const resultMap = new Map(
-        state.workResults.map((r) => ({ key: r.taskId, value: r }))
-      );
+      const entries = state.workResults.map((r) => [r.taskId, r] as const);
+      const resultMap = new Map<string, typeof state.workResults[number]>(entries);
       for (const task of state.planOutput.tasks) {
         const result = resultMap.get(task.id);
         tasks.push({
@@ -122,25 +152,47 @@ export default function (pi: ExtensionAPI) {
     const bb = getBB();
     const state = bb.getState();
 
+    // Default to the parent's model if no config is set
+    if (!state.config?.provider && !state.config?.model) {
+      if (typeof (ctx as any).getModel === 'function') {
+        const model = (ctx as any).getModel();
+        if (model) {
+          bb.setConfig({ provider: model.provider as string, model: model.id });
+        }
+      }
+    }
+
     if (state.phase !== "idle") {
       ctx.ui.notify(
         `morph pipeline at phase: ${state.phase} — /morph:status for details, /morph:reset to restart`,
         "info"
       );
+    } else {
+      ctx.ui.notify("🚀 morph — Type /morph:run <idea> to start your project", "info");
+    }
+
+    // Start animation loop
+    if (!animationInterval) {
+      animationInterval = setInterval(() => {
+        currentTick++;
+        updateWidget(ctx as any);
+      }, 100);
     }
 
     // Show persistent widget and status bar
-    updateWidget(ctx);
-    ctx.ui.setStatus("morph", buildStatusBar(buildPipelineDisplay()));
+    updateWidget(ctx as any);
+    ctx.ui.setStatus("morph", "morph: READY -- Type /morph:run <idea>");
   });
 
   pi.on("session_shutdown", async () => {
+    if (animationInterval) clearInterval(animationInterval);
+    animationInterval = null;
     currentAbortController?.abort();
     resetBB();
   });
 
   // ── Keyboard shortcuts ──
-  pi.registerShortcut("ctrl+m s", {
+  pi.registerShortcut("ctrl+m s" as any, {
     description: "morph: Spark (refine idea)",
     handler: async (ctx) => {
       const text = ctx.ui.getEditorText?.() || "";
@@ -152,35 +204,35 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerShortcut("ctrl+m p", {
+  pi.registerShortcut("ctrl+m p" as any, {
     description: "morph: Plan",
     handler: async (ctx) => {
       ctx.ui.setEditorText?.("/morph:plan");
     },
   });
 
-  pi.registerShortcut("ctrl+m w", {
+  pi.registerShortcut("ctrl+m w" as any, {
     description: "morph: Work",
     handler: async (ctx) => {
       ctx.ui.setEditorText?.("/morph:work");
     },
   });
 
-  pi.registerShortcut("ctrl+m r", {
+  pi.registerShortcut("ctrl+m r" as any, {
     description: "morph: Review",
     handler: async (ctx) => {
       ctx.ui.setEditorText?.("/morph:review");
     },
   });
 
-  pi.registerShortcut("ctrl+m h", {
+  pi.registerShortcut("ctrl+m h" as any, {
     description: "morph: Ship",
     handler: async (ctx) => {
       ctx.ui.setEditorText?.("/morph:ship");
     },
   });
 
-  pi.registerShortcut("ctrl+m g", {
+  pi.registerShortcut("ctrl+m g" as any, {
     description: "morph: Guided run (full pipeline)",
     handler: async (ctx) => {
       const text = ctx.ui.getEditorText?.() || "";
@@ -196,72 +248,10 @@ export default function (pi: ExtensionAPI) {
   // SPARK
   // ═══════════════════════════════════════════
   pi.registerCommand("morph:spark", {
-    description: "Spark: refine an idea into a PRD (Visionary + Critic)",
+    description: "Spark: start a new idea (shorthand for /morph:run)",
     handler: async (args, ctx) => {
-      if (!args?.trim()) {
-        ctx.ui.notify("Usage: /morph:spark <your idea>", "error");
-        return;
-      }
-
-      const bb = getBB();
-      if (bb.getState().phase !== "idle" && bb.getState().phase !== "spark") {
-        const ok = await ctx.ui.confirm(
-          "Pipeline in progress",
-          `Current phase: ${bb.getState().phase}. Reset and start fresh?`
-        );
-        if (!ok) return;
-        resetBB();
-      }
-
-      // Start: show widget + status
-      bb.transition("spark");
-      updateWidget(ctx);
-      ctx.ui.setStatus("morph", "morph:spark ⏳  Visionary + Critic");
-      ctx.ui.notify("Spark: Visionary drafting PRD...", "info");
-
-      try {
-        currentAbortController = new AbortController();
-
-        // ── Stage 1: Visionary ──
-        ctx.ui.setStatus("morph", "morph:spark ⏳  Visionary drafting...");
-        updateWidget(ctx);
-
-        const sparkOutput = await executeSparkFlow({
-          cwd: ctx.cwd,
-          prompt: args,
-          blackboard: bb,
-          signal: currentAbortController.signal,
-        });
-
-        // ── Done ──
-        ctx.ui.setStatus("morph", "morph:plan (ready) ✓");
-        updateWidget(ctx);
-
-        const summary = [
-          `# ✨ Spark Complete`,
-          ``,
-          `**Vision**: ${sparkOutput.visionStatement.slice(0, 300)}`,
-          ``,
-          `**Core Features** (${sparkOutput.coreFeatures.length}):`,
-          ...sparkOutput.coreFeatures.map((f) => `- ${f}`),
-          ``,
-          `**Target User**: ${sparkOutput.targetUserPersona.slice(0, 200)}`,
-          ``,
-          `**Tech Stack**: ${sparkOutput.technicalStackRecommendation}`,
-          ``,
-          `**Risks** (${sparkOutput.risks.length}):`,
-          ...sparkOutput.risks.slice(0, 5).map((r) => `- ${r}`),
-          ``,
-          `State → \`.morph/state.json\`  •  Next → /morph:plan`,
-        ].join("\n");
-
-        pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "spark" } });
-        ctx.ui.notify("Spark complete! /morph:plan to continue.", "success");
-      } catch (err: any) {
-        ctx.ui.setStatus("morph", `morph:spark ✗  ${err.message.slice(0, 40)}`);
-        ctx.ui.setWidget("morph", undefined);
-        ctx.ui.notify(`Spark failed: ${err.message}`, "error");
-      }
+      // Just delegate to morph:run for consistency
+      return (pi as any).executeCommand("morph:run", args, ctx);
     },
   });
 
@@ -280,7 +270,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       bb.transition("plan");
-      updateWidget(ctx);
+      updateWidget(ctx as any);
       ctx.ui.setStatus("morph", "morph:plan ⏳  Architect designing...");
       ctx.ui.notify("Plan: Architect + QA + Efficiency Manager working...", "info");
 
@@ -289,7 +279,7 @@ export default function (pi: ExtensionAPI) {
 
         // Stage 1: Architect
         ctx.ui.setStatus("morph", "morph:plan ⏳  Architect → architecture + tasks");
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         // Stage 2: QA + Efficiency (parallel) — status updates
         ctx.ui.setStatus("morph", "morph:plan ⏳  QA + Efficiency reviewing...");
@@ -309,7 +299,7 @@ export default function (pi: ExtensionAPI) {
           "morph",
           `morph:work (ready) ✓  ${planOutput.tasks.length} tasks, ${waves.length} waves`
         );
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         const summary = [
           `# 📋 Plan Complete`,
@@ -329,10 +319,10 @@ export default function (pi: ExtensionAPI) {
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "plan" } });
-        ctx.ui.notify(
-          `Plan done! ${planOutput.tasks.length} tasks in ${waves.length} waves. /morph:work to implement.`,
-          "success"
-        );
+          ctx.ui.notify(
+            `Plan done! ${planOutput.tasks.length} tasks in ${waves.length} waves. /morph:work to implement.`,
+            "success" as any
+          );
       } catch (err: any) {
         ctx.ui.setStatus("morph", `morph:plan ✗  ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
@@ -460,10 +450,10 @@ export default function (pi: ExtensionAPI) {
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "work" } });
-        ctx.ui.notify(
-          `Work done! ${done}/${results.length} tasks. /morph:review to audit.`,
-          done === results.length ? "success" : "warning"
-        );
+          ctx.ui.notify(
+            `Work done! ${done}/${results.length} tasks. /morph:review to audit.`,
+            (done === results.length ? "success" : "warning") as any
+          );
       } catch (err: any) {
         ctx.ui.setStatus("morph", `morph:work ✗  ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
@@ -487,7 +477,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       bb.transition("review");
-      updateWidget(ctx);
+      updateWidget(ctx as any);
       ctx.ui.setStatus("morph", "morph:review ⏳  4 reviewers auditing...");
       ctx.ui.notify("Review: Tech Lead + QA Auditor + Performance Guru + End User...", "info");
 
@@ -514,7 +504,7 @@ export default function (pi: ExtensionAPI) {
             ? "morph:ship (ready) ✓"
             : `morph:work (fixes needed) ${verdictIcon}`
         );
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         const summary = [
           `# ${verdictIcon} Review — ${reviewOutput.status}`,
@@ -544,12 +534,12 @@ export default function (pi: ExtensionAPI) {
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "review" } });
-        ctx.ui.notify(
-          reviewOutput.status === "APPROVED"
-            ? "Review APPROVED! /morph:ship to release."
-            : `Review: ${reviewOutput.status} — ${reviewOutput.requiredChanges.length} changes needed`,
-          reviewOutput.status === "APPROVED" ? "success" : "warning"
-        );
+          ctx.ui.notify(
+            reviewOutput.status === "APPROVED"
+              ? "Review APPROVED! /morph:ship to release."
+              : `Review: ${reviewOutput.status} — ${reviewOutput.requiredChanges.length} changes needed`,
+            (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
+          );
       } catch (err: any) {
         ctx.ui.setStatus("morph", `morph:review ✗  ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
@@ -573,7 +563,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       bb.transition("ship");
-      updateWidget(ctx);
+      updateWidget(ctx as any);
       ctx.ui.setStatus("morph", "morph:ship ⏳  DevOps verifying...");
       ctx.ui.notify("Ship: DevOps + Release Consultant preparing release...", "info");
 
@@ -622,7 +612,7 @@ export default function (pi: ExtensionAPI) {
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "ship" } });
-        ctx.ui.notify(`Shipped v${shipOutput.version}! Pipeline complete.`, "success");
+        ctx.ui.notify(`Shipped v${shipOutput.version}! Pipeline complete.`, "success" as any);
       } catch (err: any) {
         ctx.ui.setStatus("morph", `morph:ship ✗  ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
@@ -655,7 +645,7 @@ export default function (pi: ExtensionAPI) {
         }
         // Spark - run it first
         bb.transition("spark");
-        updateWidget(ctx);
+        updateWidget(ctx as any);
         ctx.ui.setStatus("morph", "morph:run ⏳  Spark phase...");
         ctx.ui.notify("🚀 morph pipeline started! Beginning Spark phase...", "info");
 
@@ -671,8 +661,8 @@ export default function (pi: ExtensionAPI) {
           state = bb.getState();
 
           ctx.ui.setStatus("morph", "morph:run ✓  Spark complete");
-          updateWidget(ctx);
-          ctx.ui.notify("💡 Spark complete! Review summary below.", "success");
+          updateWidget(ctx as any);
+          ctx.ui.notify("💡 Spark complete! Review summary below.", "success" as any);
 
           // Gate: Spark → Plan
           const sparkSummary = [
@@ -689,11 +679,17 @@ export default function (pi: ExtensionAPI) {
             ``,
             `**Risks** (${sparkOutput.risks.length}):`,
             ...sparkOutput.risks.slice(0, 5).map((r) => `- ${r}`),
+            ``,
+            `**Next**: Confirm to proceed to PLAN phase.`,
           ].join("\n");
 
-          const proceed = await ctx.ui.confirm(
+          pi.sendMessage({ customType: "morph", content: sparkSummary, display: true, details: { phase: "spark" } });
+
+          const proceed = await waitConfirm(
+            ctx,
             "💡 Proceed to Plan phase?",
-            "Review the Spark output above. Edit specs in the editor / .morph/ files, then confirm to continue."
+            "Review the Spark output in chat. Confirm to continue.",
+            "spark"
           );
           if (!proceed) {
             ctx.ui.notify("Pipeline paused after Spark. Run /morph:run to continue.", "info");
@@ -710,7 +706,7 @@ export default function (pi: ExtensionAPI) {
       if (state.phase === "plan") {
           ctx.ui.setStatus("morph", "morph:run ⏳  Plan phase...");
           ctx.ui.notify("📋 Plan: Architect + QA + Efficiency working...", "info");
-          updateWidget(ctx);
+          updateWidget(ctx as any);
 
           try {
             currentAbortController = new AbortController();
@@ -724,8 +720,8 @@ export default function (pi: ExtensionAPI) {
 
             const waves = waveGroups(planOutput.tasks);
             ctx.ui.setStatus("morph", `morph:run ✓  ${planOutput.tasks.length} tasks planned`);
-            updateWidget(ctx);
-            ctx.ui.notify("📋 Plan complete! Review below.", "success");
+            updateWidget(ctx as any);
+            ctx.ui.notify("📋 Plan complete! Review below.", "success" as any);
 
             // Gate: Plan → Work
             const planSummary = [
@@ -739,11 +735,17 @@ export default function (pi: ExtensionAPI) {
               `\`\`\``,
               ``,  
               `**QA Strategy**: ${planOutput.qaStrategy.slice(0, 200)}`,
+              ``,
+              `**Next**: Confirm to proceed to WORK phase (implementation).`,
             ].join("\n");
 
-            const proceed = await ctx.ui.confirm(
+            pi.sendMessage({ customType: "morph", content: planSummary, display: true, details: { phase: "plan" } });
+
+            const proceed = await waitConfirm(
+              ctx,
               "🔨 Proceed to Work phase?",
-              `${planOutput.tasks.length} tasks in ${waves.length} waves. Edit the plan in .morph/ then confirm.`
+              `${planOutput.tasks.length} tasks in ${waves.length} waves. Review plan in chat and confirm.`,
+              "plan"
             );
             if (!proceed) {
               ctx.ui.notify("Pipeline paused after Plan. Run /morph:run to continue.", "info");
@@ -760,7 +762,7 @@ export default function (pi: ExtensionAPI) {
       if (state.phase === "work") {
         ctx.ui.setStatus("morph", "morph:run ⏳  Work phase...");
         ctx.ui.notify("🔨 Work: executing task DAG...", "info");
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         try {
           currentAbortController = new AbortController();
@@ -821,23 +823,29 @@ export default function (pi: ExtensionAPI) {
           const done = results.filter((r) => r.status === "done").length;
           const failed = results.filter((r) => r.status === "failed").length;
           ctx.ui.setStatus("morph", `morph:run ✓  Work: ${done}/${results.length} done`);
-          updateWidget(ctx);
-          ctx.ui.notify(`🔨 Work complete! ${done}/${results.length} tasks done.`, "success");
+          updateWidget(ctx as any);
+          ctx.ui.notify(`🔨 Work complete! ${done}/${results.length} tasks done.`, "success" as any);
 
-          // Gate: Work → Review
+          const progressText = formatProgress(results, state.planOutput!.tasks);
           const workSummary = [
             `# 🔨 Work Complete`,
             ``,  
             `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}`,
             ``,  
-            ...results.map((r) => `- ${r.status === "done" ? "✓" : "✗"} [${r.taskId}] ${r.summary.slice(0, 80)}`),
+            progressText,
+            ``,
+            `**Next**: Confirm to proceed to REVIEW phase.`,
           ].join("\n");
 
-          const proceed = await ctx.ui.confirm(
+          pi.sendMessage({ customType: "morph", content: workSummary, display: true, details: { phase: "work" } });
+
+          const proceed = await waitConfirm(
+            ctx,
             "🔍 Proceed to Review phase?",
             failed > 0
-              ? `${failed} task(s) failed. Fix issues first, then confirm to proceed.`
-              : `All ${done} tasks done. Confirm to start review.`
+              ? `${failed} task(s) failed. Review failures in chat and confirm to proceed.`
+              : `All ${done} tasks done. Confirm to start review.`,
+            "work"
           );
           if (!proceed) {
             ctx.ui.notify("Pipeline paused after Work. Run /morph:run to continue.", "info");
@@ -854,7 +862,7 @@ export default function (pi: ExtensionAPI) {
       if (state.phase === "review") {
         ctx.ui.setStatus("morph", "morph:run ⏳  Review phase...");
         ctx.ui.notify("🔍 Review: Tech Lead + QA + Perf + End User auditing...", "info");
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         try {
           currentAbortController = new AbortController();
@@ -868,9 +876,11 @@ export default function (pi: ExtensionAPI) {
 
           const verdictIcon = reviewOutput.status === "APPROVED" ? "✅" : "❌";
           ctx.ui.setStatus("morph", `morph:run ${verdictIcon}  Review: ${reviewOutput.status}`);
-          updateWidget(ctx);
-          ctx.ui.notify(`🔍 Review: ${reviewOutput.status}`, 
-            reviewOutput.status === "APPROVED" ? "success" : "warning");
+          updateWidget(ctx as any);
+            ctx.ui.notify(
+              `🔍 Review: ${reviewOutput.status}`,
+              (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
+            );
 
           if (reviewOutput.status !== "APPROVED") {
             ctx.ui.notify("❌ Review rejected. Fix issues and run /morph:run again.", "warning");
@@ -879,19 +889,23 @@ export default function (pi: ExtensionAPI) {
 
           // Gate: Review → Ship
           const reviewSummary = [
-            `# ✅ Review — APPROVED`,
+            `# ${verdictIcon} Review — ${reviewOutput.status}`,
             ``,  
             `**Score**: ${reviewOutput.efficiencyScore}/10`,
             ``,  
             `**Technical Audit**:`,
-            reviewOutput.technicalAudit.slice(0, 300),
+            reviewOutput.technicalAudit.slice(0, 400),
             ``,  
             `**Security**: ${reviewOutput.securityIssues.length > 0 ? reviewOutput.securityIssues.length + " issues" : "No issues"}`,
+            ``,
+            `**Next**: Confirm to proceed to SHIP phase (deployment).`,
           ].join("\n");
+
+          pi.sendMessage({ customType: "morph", content: reviewSummary, display: true, details: { phase: "review" } });
 
           const proceed = await ctx.ui.confirm(
             "🚀 Proceed to Ship phase?",
-            "Review approved! Confirm to release."
+            "Review approved! Review details in chat and confirm to release."
           );
           if (!proceed) {
             ctx.ui.notify("Pipeline paused after Review. Run /morph:run to continue.", "info");
@@ -908,7 +922,7 @@ export default function (pi: ExtensionAPI) {
       if (state.phase === "ship") {
         ctx.ui.setStatus("morph", "morph:run ⏳  Ship phase...");
         ctx.ui.notify("🚀 Ship: DevOps + Release Consultant preparing release...", "info");
-        updateWidget(ctx);
+        updateWidget(ctx as any);
 
         try {
           currentAbortController = new AbortController();
@@ -921,8 +935,8 @@ export default function (pi: ExtensionAPI) {
           state = bb.getState();
 
           ctx.ui.setStatus("morph", `morph:run 🚀  v${shipOutput.version} shipped`);
-          updateWidget(ctx);
-          ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Pipeline complete.`, "success");
+          updateWidget(ctx as any);
+          ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Pipeline complete.`, "success" as any);
         } catch (err: any) {
           ctx.ui.setStatus("morph", `morph:run ✗  Ship failed: ${err.message.slice(0, 40)}`);
           ctx.ui.notify(`Ship failed: ${err.message}`, "error");
@@ -941,6 +955,28 @@ export default function (pi: ExtensionAPI) {
   // UTILITY COMMANDS
   // ═══════════════════════════════════════════
 
+  pi.registerCommand("morph:config", {
+    description: "Configure the model for morph agents (e.g. /morph:config provider=anthropic model=claude-3-5-sonnet-20241022)",
+    handler: async (args, ctx) => {
+      const bb = getBB();
+      
+      if (!args.trim()) {
+        const conf = bb.getState().config;
+        ctx.ui.notify(`Current morph config: provider=${conf?.provider || "default"}, model=${conf?.model || "default"}`, "info");
+        return;
+      }
+
+      const newConfig: any = {};
+      for (const part of args.split(" ")) {
+        const [k, v] = part.split("=");
+        if (k && v) newConfig[k] = v;
+      }
+
+      bb.setConfig(newConfig);
+      ctx.ui.notify(`Updated morph config: provider=${newConfig.provider || bb.getState().config?.provider}, model=${newConfig.model || bb.getState().config?.model}`, "success" as any);
+    }
+  });
+
   pi.registerCommand("morph:status", {
     description: "Show morph pipeline status (widget + detailed summary)",
     handler: async (_args, ctx) => {
@@ -954,7 +990,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       // Update widget + status
-      updateWidget(ctx);
+      updateWidget(ctx as any);
       ctx.ui.setStatus("morph", buildStatusBar(buildPipelineDisplay()));
 
       // Send detailed summary as message
@@ -993,7 +1029,7 @@ export default function (pi: ExtensionAPI) {
       else bb.resetPhase(phase as any);
 
       ctx.ui.setStatus("morph", `morph:${bb.getState().phase}`);
-      updateWidget(ctx);
+      updateWidget(ctx as any);
       ctx.ui.notify(`Reset to: ${bb.getState().phase}`, "info");
     },
   });
@@ -1024,10 +1060,27 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("morph:web", {
+    description: "Start the morph Mission Control Web UI",
+    handler: async (_args, ctx) => {
+      if (webServer) {
+        ctx.ui.notify("Mission Control is already running at http://localhost:4040", "info" as any);
+        return;
+      }
+      try {
+        const bb = getBB();
+        webServer = startMorphServer(bb, 4040);
+        ctx.ui.notify("🚀 Mission Control started at http://localhost:4040", "success" as any);
+      } catch (err: any) {
+        ctx.ui.notify(`Failed to start server: ${err.message}`, "error" as any);
+      }
+    },
+  });
+
   // ── Message Renderer: morph summary messages ──
   pi.registerMessageRenderer("morph", (message, _options, theme) => {
     // Just return the raw text — pi's built-in markdown rendering handles it
     // But we could add custom headers/formatting here
-    return new Text(message.content || "", 0, 0);
+    return new Text((message.content as any) || "", 0, 0);
   });
 }

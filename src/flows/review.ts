@@ -132,18 +132,21 @@ Be brutally honest. You're the customer, not a developer.`;
       task: `Review the implementation:\n\n${reviewContext}${focusInstruction}`,
       systemPrompt: qaSystemPrompt,
       signal,
+      blackboard,
     }),
     runAgent(perfGuru, {
       cwd,
       task: `Analyze performance:\n\n${reviewContext}${focusInstruction}`,
       systemPrompt: perfSystemPrompt,
       signal,
+      blackboard,
     }),
     runAgent(endUser, {
       cwd,
       task: `Evaluate as an end user:\n\nPRD Vision: ${sparkOutput.visionStatement}\n\nFeatures: ${sparkOutput.coreFeatures.join(", ")}\n\nTarget User: ${sparkOutput.targetUserPersona}${focusInstruction}`,
       systemPrompt: endUserSystemPrompt,
       signal,
+      blackboard,
     }),
   ]);
 
@@ -193,13 +196,13 @@ For each change needed, specify:
 - Every issue must have a suggestion for fixing it`;
 
   const techLeadTask = `Implementation context:\n${reviewContext}\n\nQA Audit:\n${qaResult.output}\n\nPerformance Assessment:\n${perfResult.output}\n\nEnd User Perspective:\n${userResult.output}\n\nSynthesize the final review with verdict.`;
-
-  const techLeadResult = await runAgent(techLead, {
-    cwd,
-    task: techLeadTask,
-    systemPrompt: techLeadSystemPrompt,
-    signal,
-  });
+const techLeadResult = await runAgent(techLead, {
+  cwd,
+  task: techLeadTask,
+  systemPrompt: techLeadSystemPrompt,
+  signal,
+  blackboard,
+});
 
   blackboard.addTokens(
     "review",

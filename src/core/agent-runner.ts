@@ -66,6 +66,7 @@ export interface RunAgentOptions {
   signal?: AbortSignal;
   additionalArgs?: string[];
   prependSystemPrompt?: boolean; // true = replace system prompt, false = append
+  blackboard?: any;
 }
 
 // ── Default Agent Teams ──
@@ -263,8 +264,9 @@ export async function runAgent(
     additionalArgs = [],
   } = options;
 
-  const provider = options.provider || config.provider || "anthropic";
-  const model = options.model || config.model || "claude-sonnet-4-5";
+  const bbConfig = options.blackboard?.getState()?.config || {};
+  const provider = bbConfig.provider || options.provider || config.provider || "anthropic";
+  const model = bbConfig.model || options.model || config.model || "claude-sonnet-4-5";
   const tools = options.tools || config.tools;
   const thinkingLevel = options.thinkingLevel || config.thinkingLevel || "off";
 
@@ -309,6 +311,8 @@ export async function runAgent(
   let tmpPath: string | null = null;
 
   try {
+    options.blackboard?.addActiveAgent(config.name);
+
     if (systemPrompt.trim()) {
       const tmp = await writeTempFile(config.name, systemPrompt);
       tmpDir = tmp.dir;
@@ -422,6 +426,10 @@ export async function runAgent(
 
     result.exitCode = exitCode;
 
+    if (exitCode !== 0) {
+      throw new Error(`Agent process failed (exit code ${exitCode}).\nStderr: ${result.stderr.trim() || "No error output"}`);
+    }
+
     // Calculate cost
     result.usage.cost = calculateCost(
       result.usage.inputTokens,
@@ -443,6 +451,7 @@ export async function runAgent(
 
     return result;
   } finally {
+    options.blackboard?.removeActiveAgent(config.name);
     // Cleanup temp files
     if (tmpPath)
       try {

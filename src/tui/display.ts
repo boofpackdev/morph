@@ -13,38 +13,25 @@
 import { Text, Container, Spacer, truncateToWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 
+// ── Braille Animations ──
+
+const SPINNERS = {
+  braille: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+  pulse: ["⢾", "⣉", "⡷"],
+  scan: ["⠁", "⠂", "⠄", "⠂"],
+  helix: ["⢉", "⢊", "⢔", "⢖", "⢙", "⢚", "⢠", "⢢"],
+};
+
 // ── Phase metadata ──
 
-const PHASE_ICONS: Record<string, string> = {
-  idle: "○",
-  spark: "💡",
-  plan: "📋",
-  work: "🔨",
-  review: "🔍",
-  ship: "🚀",
-  done: "✅",
-};
-
-const PHASE_LABELS: Record<string, string> = {
-  idle: "Idle",
-  spark: "Spark — Idea Refinement",
-  plan: "Plan — Architecture",
-  work: "Work — Implementation",
-  review: "Review — Audit",
-  ship: "Ship — Release",
-  done: "Complete",
-};
-
-// ── Phase progression order ──
-
-export const PHASE_ORDER = ["idle", "spark", "plan", "work", "review", "ship", "done"] as const;
+const PHASE_ORDER = ["idle", "spark", "plan", "work", "review", "ship", "done"] as const;
 
 export const ALL_PHASES = [
-  { id: "spark", icon: "💡", label: "Spark" },
-  { id: "plan", icon: "📋", label: "Plan" },
-  { id: "work", icon: "🔨", label: "Work" },
-  { id: "review", icon: "🔍", label: "Review" },
-  { id: "ship", icon: "🚀", label: "Ship" },
+  { id: "spark", icon: ">", label: "SPARK" },
+  { id: "plan", icon: ">", label: "PLAN" },
+  { id: "work", icon: ">", label: "WORK" },
+  { id: "review", icon: ">", label: "REVIEW" },
+  { id: "ship", icon: ">", label: "SHIP" },
 ];
 
 // ── Helpers ──
@@ -83,68 +70,12 @@ export interface PipelineDisplay {
   phase: string;
   tasks: TaskDisplay[];
   agents: AgentActivity[];
-  tokenLedger: { spark: number; plan: number; work: number; review: number; ship: number; total: number };
-}
-
-// ── Widget content builders (return string[]) ──
-
-export function buildPhaseWidget(state: PipelineDisplay): string[] {
-  const lines: string[] = [];
-  const icon = PHASE_ICONS[state.phase] || "○";
-  const label = PHASE_LABELS[state.phase] || state.phase;
-
-  // Header
-  if (state.phase === "idle") {
-    lines.push(`${icon}  morph — Ready`);
-    lines.push("   Type /morph:spark <idea> to begin");
-    return lines;
-  }
-
-  if (state.phase === "done") {
-    lines.push(`${icon}  morph — Pipeline Complete!`);
-    const total = state.tokenLedger.total;
-    if (total > 0) lines.push(`   Tokens: ${formatDisplayTokens(total)}`);
-    return lines;
-  }
-
-  lines.push(`${icon}  ${label}`);
-
-  // Task progress
-  if (state.tasks.length > 0) {
-    const done = state.tasks.filter((t) => t.status === "done").length;
-    const running = state.tasks.filter((t) => t.status === "running").length;
-    const failed = state.tasks.filter((t) => t.status === "failed").length;
-    const blocked = state.tasks.filter((t) => t.status === "blocked").length;
-
-    lines.push(`   Tasks: ${done}/${state.tasks.length} done  ${bar(done, state.tasks.length, 16)}`);
-    if (running > 0 || failed > 0 || blocked > 0) {
-      const parts: string[] = [];
-      if (running > 0) parts.push(`${running} running`);
-      if (failed > 0) parts.push(`${failed} failed`);
-      if (blocked > 0) parts.push(`${blocked} blocked`);
-      lines.push(`   ${parts.join("  ")}`);
-    }
-  }
-
-  // Active agents
-  const activeAgents = state.agents.filter((a) => a.status === "running");
-  if (activeAgents.length > 0) {
-    lines.push(`   Agents: ${activeAgents.map((a) => `${a.name}(${a.role})`).join(", ")}`);
-  }
-
-  // Token cost
-  if (state.tokenLedger.total > 0) {
-    lines.push(`   Tokens: ${formatDisplayTokens(state.tokenLedger.total)}`);
-  }
-
-  return lines;
+  tokenLedger: { spark: number; plan: number; work: number; review: number; ship: number; total: number };      
+  tick?: number;
 }
 
 /**
  * Build a colored pipeline progress widget for the TUI.
- * Shows all 5 phases with filled/empty bars and color-coded status.
- *
- * Works as a theme-aware component for ctx.ui.setWidget's callback form.
  */
 export function buildPipelineProgressWidget(
   display: PipelineDisplay,
@@ -175,50 +106,63 @@ export function buildPipelineProgressWidget(
   return {
     render: (width: number) => {
       const lines: string[] = [];
+      const tick = display.tick || 0;
 
       if (display.phase === "idle") {
-        lines.push(theme.fg("dim", "  morph — Ready"));
+        lines.push(theme.fg("dim", "  morph -- READY"));
         lines.push(theme.fg("dim", "   /morph:run <idea> to start"));
         return lines;
       }
 
       if (display.phase === "done") {
-        lines.push(theme.fg("success", theme.bold("  ✅  morph — Pipeline Complete!")));
+        lines.push(theme.fg("success", theme.bold("  [v] morph -- PIPELINE COMPLETE")));
         if (display.tokenLedger.total > 0) {
           lines.push(
-            `   ${theme.fg("success", "✓")}  ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`
+            `   ${theme.fg("success", "[DONE]")}  ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`
           );
         }
         return lines;
       }
 
       // Title
-      lines.push(theme.fg("accent", theme.bold("  morph — Pipeline Progress")));
+      lines.push(theme.fg("accent", theme.bold("  morph -- PIPELINE PROGRESS")));
       lines.push("");
 
       for (const phase of ALL_PHASES) {
         const status = phaseStatus(phase.id);
         const barStr = phaseBar(status);
-        const sIcon =
-          status === "done"
-            ? theme.fg("success", "✓")
-            : status === "current"
-              ? theme.fg("accent", "⏳")
-              : theme.fg("dim", "○");
+        
+        let sIcon = theme.fg("dim", "(o)");
+        let coloredBar = theme.fg("dim", barStr);
+        let labelColor: any = "dim";
 
-        const coloredBar =
-          status === "done"
-            ? theme.fg("success", barStr)
-            : status === "current"
-              ? theme.fg("accent", barStr)
-              : theme.fg("dim", barStr);
+        if (status === "done") {
+          sIcon = theme.fg("success", "[v]");
+          coloredBar = theme.fg("success", barStr);
+          labelColor = "success";
+        } else if (status === "current") {
+          const spin = SPINNERS.pulse[tick % SPINNERS.pulse.length];
+          sIcon = theme.fg("accent", `[${spin}]`);
+          coloredBar = theme.fg("accent", barStr);
+          labelColor = "accent";
+        }
 
         // Pad the label manually avoiding ANSI width issues
         const rawLabel = `${phase.icon} ${phase.label}`;
         const padAmount = 11 - rawLabel.length;
-        const paddedLabel = rawLabel + " ".repeat(Math.max(0, padAmount));
+        const paddedLabel = theme.fg(labelColor, rawLabel + " ".repeat(Math.max(0, padAmount)));
 
         lines.push(`  ${paddedLabel}${coloredBar}  ${sIcon}`);
+      }
+
+      // Active agents (detailed view)
+      const activeAgents = display.agents.filter((a) => a.status === "running");
+      if (activeAgents.length > 0) {
+        lines.push("");
+        for (const agent of activeAgents) {
+          const spin = SPINNERS.braille[tick % SPINNERS.braille.length];
+          lines.push(`  ${theme.fg("accent", spin)}  ${theme.fg("muted", agent.role)} ${theme.fg("dim", `(${agent.name})`)}`);
+        }
       }
 
       lines.push("");
@@ -229,18 +173,18 @@ export function buildPipelineProgressWidget(
         const total = display.tasks.length;
         const pct = total > 0 ? Math.round((done / total) * 100) : 0;
         const color = done === total ? "success" : "accent";
-        lines.push(`   ${theme.fg(color, `Tasks: ${done}/${total} (${pct}%)`)}`);
+        lines.push(`   ${theme.fg(color, `TASKS: ${done}/${total} (${pct}%)`)}`);
       }
 
       // Token cost
       if (display.tokenLedger.total > 0) {
-        lines.push(`   ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`);
+        lines.push(`   ${theme.fg("muted", `TOKENS: ${formatDisplayTokens(display.tokenLedger.total)}`)}`);     
       }
 
       // Bottom hint
       if (display.phase !== "done") {
         lines.push(
-          theme.fg("dim", "   /morph:run to continue  •  /morph:status for details")
+          theme.fg("dim", "   /morph:run to continue | /morph:status for details")
         );
       }
 
@@ -257,42 +201,24 @@ export function buildPipelineProgressWidget(
 /**
  * Build a detailed task tracker (for expanded view / chat messages).
  */
-export function buildTaskTracker(state: PipelineDisplay): string[] {
+export function buildTaskTracker(state: PipelineDisplay, theme: Theme): string[] {
   const lines: string[] = [];
   const done = state.tasks.filter((t) => t.status === "done").length;
   const total = state.tasks.length;
 
   lines.push("");
-  lines.push("┌─ morph Task Tracker ──────────────────────────────");
-  lines.push(`│ ${done}/${total} done  ${bar(done, total, 30)}`);
-  lines.push("├────────────────────────────────────────────────────");
+  lines.push(theme.fg("accent", "+-- morph TASK TRACKER -----------------------------------+"));
+  lines.push(`| ${theme.fg("success", String(done))}/${total} done  ${theme.fg("accent", bar(done, total, 30))}`);
+  lines.push(theme.fg("accent", "+---------------------------------------------------------+"));
 
   for (const task of state.tasks) {
-    const icon = statusIcon(task.status);
+    const icon = statusIcon(task.status, theme);
     const desc = truncate(task.description, 40);
     const meta = task.agent ? ` [${task.agent}]` : "";
-    lines.push(`│ ${icon} ${pad(`[${task.id}]`, 8)} ${pad(desc, 42)}${meta}`);
+    lines.push(`| ${icon} ${theme.fg("dim", pad(`[${task.id}]`, 8))} ${pad(desc, 42)}${meta}`);
   }
 
-  lines.push("└────────────────────────────────────────────────────");
-  return lines;
-}
-
-/**
- * Build agent activity summary.
- */
-export function buildAgentSummary(state: PipelineDisplay): string[] {
-  const lines: string[] = [];
-  lines.push("");
-  lines.push("┌─ morph Agents ────────────────────────────────────");
-
-  for (const agent of state.agents) {
-    const icon = statusIcon(agent.status);
-    const line = `│ ${icon} ${pad(agent.role, 22)} (${agent.name}) — ${agent.phase}`;
-    lines.push(line);
-  }
-
-  lines.push("└────────────────────────────────────────────────────");
+  lines.push(theme.fg("accent", "+---------------------------------------------------------+"));
   return lines;
 }
 
@@ -301,16 +227,16 @@ export function buildAgentSummary(state: PipelineDisplay): string[] {
  */
 export function buildStatusBar(state: PipelineDisplay): string {
   if (state.phase === "idle") return "morph: idle";
-  if (state.phase === "done") return `morph: done ✓  ${formatDisplayTokens(state.tokenLedger.total)} tok`;
+  if (state.phase === "done") return `morph: DONE [v] ${formatDisplayTokens(state.tokenLedger.total)} tok`;    
 
   const done = state.tasks.filter((t) => t.status === "done").length;
   const total = state.tasks.length;
   const running = state.agents.filter((a) => a.status === "running").length;
 
-  let text = `morph:${state.phase}`;
-  if (total > 0) text += `  tasks:${done}/${total}`;
-  if (running > 0) text += `  agents:${running}`;
-  if (state.tokenLedger.total > 0) text += `  ${formatDisplayTokens(state.tokenLedger.total)}tok`;
+  let text = `morph:${state.phase.toUpperCase()}`;
+  if (total > 0) text += ` tasks:${done}/${total}`;
+  if (running > 0) text += ` agents:${running}`;
+  if (state.tokenLedger.total > 0) text += ` ${formatDisplayTokens(state.tokenLedger.total)}tok`;
 
   return text;
 }
@@ -321,32 +247,29 @@ export function renderMorphMessage(
   content: string,
   theme: Theme
 ): { widget: string[] } | null {
-  // Parse markdown sections
   const sections = content.split(/^#+\s+/m).filter(Boolean);
-
   if (sections.length === 0) return null;
-
   return { widget: content.split("\n") };
 }
 
 // ── Utilities ──
 
-function statusIcon(status: string): string {
+function statusIcon(status: string, theme: Theme): string {
   switch (status) {
     case "done":
-      return "✓";
+      return theme.fg("success", "[v]");
     case "running":
-      return "⏳";
+      return theme.fg("accent", "[*]");
     case "blocked":
-      return "⊘";
+      return theme.fg("error", "[!]");
     case "failed":
-      return "✗";
+      return theme.fg("error", "[x]");
     case "error":
-      return "✗";
+      return theme.fg("error", "[x]");
     case "pending":
     case "idle":
     default:
-      return "○";
+      return theme.fg("dim", "(o)");
   }
 }
 

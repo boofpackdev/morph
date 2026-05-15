@@ -66,23 +66,39 @@ export async function executeWorkFlow(
   // Sort tasks topologically
   const sorted = topologicalSort(planOutput.tasks);
   const completedIds = new Set<string>();
+  const processedIds = new Set<string>();
   const allResults: WorkTaskResult[] = [];
   let waveIndex = 0;
 
   // Process waves
-  while (completedIds.size < sorted.length) {
-    const ready = getReadyTasks(sorted, completedIds);
+  while (processedIds.size < sorted.length) {
+    const ready = sorted.filter(
+      (task) =>
+        !processedIds.has(task.id) &&
+        task.dependsOn.every((dep) => completedIds.has(dep))
+    );
     if (ready.length === 0) {
       // Stuck — check for circular deps or all blocked
-      const remaining = sorted.filter((t) => !completedIds.has(t.id));
+      const remaining = sorted.filter((t) => !processedIds.has(t.id));
       const blocked = remaining.filter((t) => {
         const deps = t.dependsOn.filter((d) => !completedIds.has(d));
         return deps.length > 0;
       });
       if (blocked.length === remaining.length) {
-        throw new Error(
-          `Work stuck: ${blocked.length} tasks blocked by unresolved dependencies`
-        );
+        // Mark all blocked tasks as failed
+        for (const task of blocked) {
+          const result: WorkTaskResult = {
+            taskId: task.id,
+            status: "blocked",
+            summary: `Blocked by failed dependencies: ${task.dependsOn.filter(d => !completedIds.has(d)).join(", ")}`,
+            filesChanged: [],
+          };
+          allResults.push(result);
+          blackboard.addWorkResult(result);
+          processedIds.add(task.id);
+          onTaskComplete?.(result);
+        }
+        continue; // Evaluate next state, will exit if all processed
       }
       break;
     }
@@ -125,6 +141,7 @@ export async function executeWorkFlow(
       for (const result of batchResults) {
         allResults.push(result);
         blackboard.addWorkResult(result);
+        processedIds.add(result.taskId);
         if (result.status === "done") {
           completedIds.add(result.taskId);
         }
@@ -194,6 +211,7 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
       task: `Implement task ${task.id}: ${task.description}\n\nAcceptance criteria: ${task.acceptanceCriteria}\n\nGet it done.`,
       systemPrompt: engSystemPrompt,
       signal,
+      blackboard,
     });
 
     blackboard.addTokens(
@@ -207,6 +225,7 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
         taskId: task.id,
         status: "failed",
         summary: engResult.errorMessage || engResult.output || "Implementation failed",
+        filesChanged: [],
       };
       onTaskComplete?.(result);
       return result;
@@ -242,6 +261,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       task: `Review the implementation of task ${task.id}: ${task.description}\n\nThe engineer's summary:\n${engResult.output}\n\nCheck the actual files and verify.`,
       systemPrompt: revSystemPrompt,
       signal,
+      blackboard,
     });
 
     blackboard.addTokens(
@@ -257,6 +277,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         taskId: task.id,
         status: "done",
         summary: engResult.output || "Task completed",
+        filesChanged: [],
         testsPassed: true,
       };
       onTaskComplete?.(result);
@@ -274,6 +295,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       taskId: task.id,
       status: "failed",
       summary: `Review rejected after ${maxRetries} attempts: ${reviewOutput.slice(0, 200)}`,
+      filesChanged: [],
     };
     onTaskComplete?.(result);
     return result;
@@ -284,6 +306,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
     taskId: task.id,
     status: "failed",
     summary: `Failed after ${maxRetries} retry attempts`,
+    filesChanged: [],
   };
   onTaskComplete?.(result);
   return result;

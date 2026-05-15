@@ -42,8 +42,10 @@ function ensureDir(dir: string): void {
 export function createInitialState(): MorphState {
   return {
     phase: "idle",
+    config: {},
     workResults: [],
     tokenLedger: { spark: 0, plan: 0, work: 0, review: 0, ship: 0, total: 0 },
+    activeAgents: [],
     retries: {},
     decisions: [],
   };
@@ -55,12 +57,46 @@ export function createInitialState(): MorphState {
 export class Blackboard {
   private cwd: string;
   private state: MorphState;
+  private listeners: Array<() => void> = [];
 
   constructor(cwd: string) {
     this.cwd = cwd;
     ensureDir(getMorphDir(cwd));
     ensureDir(getHistoryDir(cwd));
     this.state = this.load();
+  }
+
+  subscribe(fn: () => void): () => void {
+    this.listeners.push(fn);
+    return () => {
+      this.listeners = this.listeners.filter((l) => l !== fn);
+    };
+  }
+
+  private notify(): void {
+    for (const l of this.listeners) l();
+  }
+
+  /** Add an agent to the active list. */
+  addActiveAgent(agentName: string): void {
+    if (!this.state.activeAgents.includes(agentName)) {
+      this.state.activeAgents.push(agentName);
+      this.save();
+    }
+  }
+
+  /** Remove an agent from the active list. */
+  removeActiveAgent(agentName: string): void {
+    this.state.activeAgents = this.state.activeAgents.filter(
+      (a) => a !== agentName
+    );
+    this.save();
+  }
+
+  /** Clear all active agents. */
+  clearActiveAgents(): void {
+    this.state.activeAgents = [];
+    this.save();
   }
 
   /** Load state from disk, or initialize fresh. */
@@ -84,7 +120,14 @@ export class Blackboard {
   /** Persist current state to disk. */
   save(): void {
     const statePath = getStatePath(this.cwd);
-    fs.writeFileSync(statePath, JSON.stringify(this.state, null, 2), "utf-8");
+    ensureDir(getMorphDir(this.cwd));
+
+    // Atomic write
+    const tmpPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
+    const payload = JSON.stringify(this.state, null, 2) + "\n";
+    fs.writeFileSync(tmpPath, payload, "utf-8");
+    fs.renameSync(tmpPath, statePath);
+    this.notify();
   }
 
   /** Archive current state for debugging. */
@@ -105,6 +148,12 @@ export class Blackboard {
   /** Transition to a new phase. Enforces valid flow. */
   transition(target: MorphPhase): void {
     this.state.phase = target;
+    this.save();
+  }
+
+  /** Update global config overrides (e.g. from TUI). */
+  setConfig(config: { provider?: string; model?: string }): void {
+    this.state.config = { ...this.state.config, ...config };
     this.save();
   }
 

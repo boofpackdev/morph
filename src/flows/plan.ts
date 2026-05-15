@@ -87,6 +87,7 @@ Be exhaustive. This plan drives the entire implementation phase.`;
     task: architectTask,
     systemPrompt: architectSystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens("plan", estimateTokens(architectResult.output || ""));
@@ -152,6 +153,7 @@ Produce:
     task: `Architecture plan:\n${planText}\n\nReview for testability and QA strategy.`,
     systemPrompt: qaSystemPrompt,
     signal,
+    blackboard,
   });
 
   const effResultActual = await runAgent(efficiencyMgr, {
@@ -159,6 +161,7 @@ Produce:
     task: `Architecture plan:\n${planText}\n\nAnalyze for efficiency and optimization.`,
     systemPrompt: efficiencySystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens("plan", estimateTokens(qaResultActual.output || ""));
@@ -221,6 +224,7 @@ Tasks must form a valid DAG (no cycles).`;
     task: synthesisTask,
     systemPrompt: synthesisSystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens("plan", estimateTokens(finalResult.output || ""));

@@ -171,6 +171,12 @@ export type MorphPhase = z.infer<typeof MorphPhaseSchema>;
 
 export const MorphStateSchema = z.object({
   phase: MorphPhaseSchema,
+  config: z
+    .object({
+      provider: z.string().optional(),
+      model: z.string().optional(),
+    })
+    .default({}),
   startedAt: z.string().optional(),
   sparkOutput: SparkOutputSchema.optional(),
   planOutput: PlanOutputSchema.optional(),
@@ -187,6 +193,7 @@ export const MorphStateSchema = z.object({
       total: z.number().default(0),
     })
     .default({}),
+  activeAgents: z.array(z.string()).default([]),
   retries: z.record(z.string(), z.number()).default({}),
   decisions: z
     .array(

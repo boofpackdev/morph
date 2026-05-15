@@ -115,12 +115,14 @@ Keep the changelog clear and user-focused. No internal jargon.`;
       task: `Prepare for release to ${target}:\n\n${shipContext}`,
       systemPrompt: devopsSystemPrompt,
       signal,
+      blackboard,
     }),
     runAgent(releaseConsultant, {
       cwd,
       task: `Generate release artifacts:\n\n${shipContext}`,
       systemPrompt: consultantSystemPrompt,
       signal,
+      blackboard,
     }),
   ]);
 

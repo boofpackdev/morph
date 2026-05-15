@@ -77,6 +77,7 @@ Be exhaustive. Think through edge cases. This PRD will be stress-tested by a Cri
     task: `Refine this idea into a comprehensive PRD:\n\n${prompt}`,
     systemPrompt: visionarySystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens(
@@ -121,6 +122,7 @@ Be sharp, specific, and constructive. Every criticism must come with a suggested
     task: `Critique this PRD thoroughly:\n\n${visionaryResult.output}`,
     systemPrompt: criticSystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens("spark", estimateTokens(criticResult.output || ""));
@@ -167,6 +169,7 @@ Be concise. This output flows directly to the Plan phase.`;
     task: `My original PRD:\n${visionaryResult.output}\n\nCritic's feedback:\n${criticResult.output}\n\nSynthesize a FINAL, refined PRD.`,
     systemPrompt: synthesisSystemPrompt,
     signal,
+    blackboard,
   });
 
   blackboard.addTokens("spark", estimateTokens(synthesisResult.output || ""));
@@ -196,32 +199,44 @@ Be concise. This output flows directly to the Plan phase.`;
 
 function parseSparkOutput(text: string, originalPrompt: string): SparkOutput {
   const extractSection = (marker: string): string => {
+    // Match ### SECTION or ## SECTION or SECTION: 
     const regex = new RegExp(
-      `###\\s*${marker}[\\s\\S]*?(?=###\\s|$)`,
+      `(?:###|##|#)?\\s*${marker}(?:\\s*:)?\\s*[\\s\\S]*?(?=(?:###|##|#)\\s|$)`,
       "i"
     );
     const match = text.match(regex);
-    return match ? match[0].replace(/^###\s*${marker}\s*/i, "").trim() : "";
+    if (!match) return "";
+    
+    return match[0]
+      .replace(new RegExp(`^(?:###|##|#)?\\s*${marker}(?:\\s*:)?\\s*`, "i"), "")
+      .trim();
   };
 
   const extractList = (marker: string): string[] => {
     const section = extractSection(marker);
     return section
       .split("\n")
-      .map((l) => l.replace(/^[-*]\s*/, "").trim())
-      .filter((l) => l.length > 0);
+      .map((l) => l.replace(/^[-*•]\s*/, "").trim())
+      .filter((l) => l.length > 0 && !l.toLowerCase().includes(marker.toLowerCase()));
   };
 
-  return {
-    visionStatement: extractSection("VISION STATEMENT") || "Vision not extracted",
-    coreFeatures: extractList("CORE FEATURES"),
-    targetUserPersona: extractSection("TARGET USER PERSONA") || "Persona not extracted",
+  const vision = extractSection("VISION STATEMENT") || extractSection("VISION");
+  const persona = extractSection("TARGET USER PERSONA") || extractSection("USER PERSONA") || extractSection("PERSONA");
+  const stack = extractSection("TECHNICAL STACK RECOMMENDATION") || extractSection("TECHNICAL STACK") || extractSection("TECH STACK") || extractSection("STACK");
+
+  const output = {
+    visionStatement: vision || originalPrompt.slice(0, 500),
+    coreFeatures: extractList("CORE FEATURES").length > 0 ? extractList("CORE FEATURES") : extractList("FEATURES"),
+    targetUserPersona: persona || "General User",
     constraints: extractList("CONSTRAINTS"),
-    technicalStackRecommendation:
-      extractSection("TECHNICAL STACK RECOMMENDATION") ||
-      extractSection("TECHNICAL STACK") ||
-      "Stack not specified",
+    technicalStackRecommendation: stack || "Stack not specified",
     risks: extractList("RISKS"),
     successCriteria: extractList("SUCCESS CRITERIA"),
   };
+  
+  if (output.visionStatement === "Vision not extracted" && text.length < 50) {
+    throw new Error(`Spark failed to generate a valid PRD. Agent output was too short: "${text}"`);
+  }
+  
+  return output;
 }
