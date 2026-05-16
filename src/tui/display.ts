@@ -75,6 +75,18 @@ export interface SubagentActivity {
   toolDetail: string;
 }
 
+export interface FileActivity {
+  agentName: string;
+  role: string;
+  path: string;
+  absolutePath?: string;
+  operation: "read" | "edit" | "write";
+  beforeLines?: number;
+  afterLines?: number;
+  delta?: number;
+  status: "active" | "done";
+}
+
 export interface PhaseContext {
   title: string;
   lines: string[];
@@ -92,12 +104,34 @@ export interface AgentActivity {
 
 export interface PipelineDisplay {
   phase: string;
+  status: "ready" | "busy" | "waiting";
   tasks: TaskDisplay[];
   agents: AgentActivity[];
   tokenLedger: { spark: number; plan: number; work: number; review: number; ship: number; total: number };
   tick: number;
   subagentActivities?: SubagentActivity[];
+  fileActivities?: FileActivity[];
   phaseContext?: PhaseContext;
+  footerHint?: string;
+  restoredCheckpointCount?: number;
+}
+
+/**
+ * Get the animated status indicator.
+ */
+function getIndicator(status: PipelineDisplay["status"], tick: number, theme: Theme): string {
+  if (status === "waiting") {
+    // Red pulsing: ● / ○
+    const char = tick % 2 === 0 ? "●" : "○";
+    return theme.fg("error", char);
+  }
+  if (status === "busy") {
+    // Yellow spinner
+    const spin = SPINNERS.braille[tick % SPINNERS.braille.length];
+    return theme.fg("accent", spin);
+  }
+  // Green ready: ●
+  return theme.fg("success", "●");
 }
 
 /**
@@ -109,16 +143,27 @@ export function buildPipelineProgressWidget(
 ): { render: (width: number) => string[]; invalidate: () => void } {
   const barW = 16;
 
-  function phaseBar(status: "done" | "current" | "pending" | "failed"): string {
-    const filled =
-      status === "done"
-        ? barW
-        : status === "current"
-          ? Math.ceil(barW * 0.55)
-          : 0;
-    const empty = barW - filled;
-    if (filled === 0) return "░".repeat(barW);
-    return "█".repeat(filled) + "░".repeat(empty);
+  function phaseBar(
+    display: PipelineDisplay,
+    phaseId: string,
+    status: "done" | "current" | "pending" | "failed",
+    tick: number
+  ): string {
+    if (status === "done") return "█".repeat(barW);
+    if (status !== "current") return "░".repeat(barW);
+
+    if (phaseId === "work" && display.tasks.length > 0) {
+      const completed = display.tasks.filter((task) => task.status === "done").length;
+      const filled = Math.round((completed / display.tasks.length) * barW);
+      return "█".repeat(filled) + "░".repeat(barW - filled);
+    }
+
+    // For phases without a truthful denominator, animate activity instead of
+    // implying a fake percentage.
+    const head = tick % barW;
+    return Array.from({ length: barW }, (_, index) =>
+      index === head || index === (head + 1) % barW ? "█" : "░"
+    ).join("");
   }
 
   function phaseStatus(displayPhase: string, phaseId: string): "done" | "current" | "pending" | "failed" {
@@ -135,30 +180,31 @@ export function buildPipelineProgressWidget(
       const display = getDisplay();
       const lines: string[] = [];
       const tick = display.tick ?? 0;
+      const indicator = getIndicator(display.status, tick, theme);
 
       if (display.phase === "idle") {
-        lines.push(theme.fg("dim", "  morph — READY"));
-        lines.push(theme.fg("dim", "   /morph:run <idea> to start"));
+        lines.push(`  ${indicator} ${theme.fg("dim", "morph — READY")}`);
+        lines.push(theme.fg("dim", "    /morph:run <idea> to start"));
         return lines;
       }
 
       if (display.phase === "done") {
-        lines.push(theme.fg("success", theme.bold("  ✓ morph — PIPELINE COMPLETE")));
+        lines.push(`  ${indicator} ${theme.fg("success", theme.bold("morph — PIPELINE COMPLETE"))}`);
         if (display.tokenLedger.total > 0) {
           lines.push(
-            `   ${theme.fg("success", "[DONE]")}  ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`
+            `    ${theme.fg("success", "[DONE]")}  ${theme.fg("muted", `Tokens: ${formatDisplayTokens(display.tokenLedger.total)}`)}`
           );
         }
         return lines;
       }
 
       // Title
-      lines.push(theme.fg("accent", theme.bold("  morph — PIPELINE PROGRESS")));
+      lines.push(`  ${indicator} ${theme.fg("accent", theme.bold("morph — PIPELINE PROGRESS"))}`);
       lines.push("");
 
       for (const phase of ALL_PHASES) {
         const status = phaseStatus(display.phase, phase.id);
-        const barStr = phaseBar(status);
+        const barStr = phaseBar(display, phase.id, status, tick);
         
         let sIcon = theme.fg("dim", "(o)");
         let coloredBar = theme.fg("dim", barStr);
@@ -183,23 +229,6 @@ export function buildPipelineProgressWidget(
         lines.push(`  ${paddedLabel}${coloredBar}  ${sIcon}`);
       }
 
-      const subs = display.subagentActivities?.filter((s) => s.status === "running") || [];
-      if (subs.length > 0) {
-        lines.push("");
-        for (const sub of subs) {
-          const spin = SPINNERS.helix[tick % SPINNERS.helix.length];
-          const toolInfo = sub.currentTool
-            ? theme.fg("accent", sub.currentTool) + (sub.toolDetail ? theme.fg("dim", ` ${sub.toolDetail}`) : "")
-            : theme.fg("dim", "thinking...");
-          const taskTag = theme.fg("dim", sub.taskId && sub.taskId !== "-" ? `[${sub.taskId}]` : "");
-          lines.push(`  ${theme.fg("accent", spin)}  ${theme.fg("muted", sub.role)} ${taskTag} ${toolInfo}`);
-          if (sub.lastAction) {
-            const snippet = sub.lastAction.length > 55 ? sub.lastAction.slice(0, 53) + "…" : sub.lastAction;
-            lines.push(`     ${theme.fg("dim", snippet)}`);
-          }
-        }
-      }
-
       lines.push("");
 
       // Task summary (only in work phase)
@@ -220,13 +249,13 @@ export function buildPipelineProgressWidget(
       // Bottom hint
       if (display.phase !== "done") {
         lines.push(
-          theme.fg("dim", "   /morph:run to continue | /morph:status for details")
+          theme.fg("dim", `   ${buildFooterHint(display)}`)
         );
       }
 
       const leftColumnWidth = 35;
       const columnGap = 3;
-      const contextLines = buildPhaseContextPanel(
+      const contextLines = buildOperatorPanel(
         display,
         theme,
         Math.max(34, width - leftColumnWidth - columnGap)
@@ -264,21 +293,107 @@ function combineColumns(left: string[], right: string[], leftWidth: number, gap:
   return lines;
 }
 
-function buildPhaseContextPanel(display: PipelineDisplay, theme: Theme, width: number): string[] {
+function buildFooterHint(display: PipelineDisplay): string {
+  if (display.footerHint) return display.footerHint;
+  if (display.status === "waiting") return "approval needed  |  respond in Pi";
+  if (display.status === "busy") return "working...  |  /morph:status";
+
+  switch (display.phase) {
+    case "spark":
+      return "next -> plan gate";
+    case "plan":
+      return "next -> approve work spec";
+    case "work":
+      return "next -> review gate";
+    case "review":
+      return "next -> review verdict";
+    case "ship":
+      return "next -> release handoff";
+    default:
+      return "/morph:run  |  /morph:status";
+  }
+}
+
+function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: number): string[] {
   if (!display.phaseContext) return [];
   const innerWidth = Math.max(20, width - 4);
   const border = "─".repeat(innerWidth + 2);
+  const activeSubs = display.subagentActivities?.filter((sub) => sub.status === "running") ?? [];
+  const fileActivities = display.fileActivities ?? [];
+  const activeFiles = fileActivities.filter((activity) => activity.status === "active");
+  const recentFiles = fileActivities.filter((activity) => activity.status === "done");
   const lines = [
     theme.fg("dim", `╭${border}╮`),
-    theme.fg("accent", `│ ${pad(display.phaseContext.title, innerWidth)} │`),
+    buildOperatorHeader(display, theme, innerWidth),
     theme.fg("dim", `├${border}┤`),
   ];
-  for (const line of display.phaseContext.lines.slice(0, 6)) {
-    const color = line.includes("!") ? "error" : line.includes("●") ? "accent" : line.includes("✓") ? "success" : "muted";
-    lines.push(theme.fg(color, `│ ${pad(truncateToWidth(line, innerWidth), innerWidth)} │`));
+
+  if (activeFiles.length === 0 && recentFiles.length === 0) {
+    lines.push(theme.fg("dim", `│ ${pad("no file changes yet", innerWidth)} │`));
+  } else {
+    for (const activity of [...activeFiles, ...recentFiles].slice(0, 4)) {
+      const op = activity.operation.toUpperCase();
+      const marker = activity.status === "active" ? ">" : "✓";
+      const lineStats =
+        activity.beforeLines !== undefined && activity.afterLines !== undefined
+          ? ` ${activity.beforeLines} -> ${activity.afterLines} lines (${formatDelta(activity.delta ?? 0)})`
+          : activity.beforeLines !== undefined
+            ? ` ${activity.beforeLines} lines`
+            : "";
+      const row = `${marker} ${op} ${activity.path}${lineStats}`;
+      const color =
+        activity.status === "active"
+          ? "accent"
+          : (activity.delta ?? 0) > 0
+            ? "success"
+            : (activity.delta ?? 0) < 0
+              ? "error"
+              : "muted";
+      lines.push(theme.fg(color as any, `│ ${pad(truncateToWidth(row, innerWidth), innerWidth)} │`));
+    }
   }
+
+  if (activeSubs.length > 0) {
+    lines.push(theme.fg("dim", `├${border}┤`));
+    lines.push(theme.fg("accent", `│ ${pad("ACTIVE", innerWidth)} │`));
+    for (const sub of activeSubs.slice(0, 3)) {
+      const taskTag = sub.taskId && sub.taskId !== "-" ? ` [${sub.taskId}]` : "";
+      const tool = sub.currentTool
+        ? `${sub.currentTool}${sub.toolDetail ? ` ${sub.toolDetail}` : ""}`
+        : "thinking...";
+      const summary = `${sub.role}${taskTag}  ${tool}`;
+      lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(summary, innerWidth), innerWidth)} │`));
+      if (sub.lastAction) {
+        lines.push(theme.fg("dim", `│ ${pad(truncateToWidth(`↳ ${sub.lastAction}`, innerWidth), innerWidth)} │`));
+      }
+    }
+  }
+
+  lines.push(theme.fg("dim", `├${border}┤`));
+  lines.push(theme.fg("accent", `│ ${pad(display.phaseContext.title, innerWidth)} │`));
+  for (const line of display.phaseContext.lines.slice(0, 2)) {
+    lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(line, innerWidth), innerWidth)} │`));
+  }
+
   lines.push(theme.fg("dim", `╰${border}╯`));
   return lines;
+}
+
+function formatDelta(delta: number): string {
+  if (delta > 0) return `+${delta}`;
+  return String(delta);
+}
+
+function buildOperatorHeader(display: PipelineDisplay, theme: Theme, innerWidth: number): string {
+  const restored = display.restoredCheckpointCount ?? 0;
+  if (restored <= 0) {
+    return theme.fg("accent", `│ ${pad("FILE ACTIVITY", innerWidth)} │`);
+  }
+
+  const label = "FILE ACTIVITY";
+  const badge = `RESTORED ${restored}`;
+  const gap = Math.max(1, innerWidth - label.length - badge.length);
+  return `│ ${theme.fg("accent", label)}${" ".repeat(gap)}${theme.fg("success", badge)} │`;
 }
 
 /**

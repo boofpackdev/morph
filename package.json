@@ -1,7 +1,7 @@
 {
   "name": "@boofpackdev/pi-morph",
-  "version": "0.5.0",
-  "description": "Agent orchestration layer for pi — guided 5-stage pipeline: spark → plan → work → review → ship. Colored TUI progress bar, review gates, and autonomous autorecovery loops.",
+  "version": "0.6.0",
+  "description": "Agent orchestration layer for pi — guided 5-stage pipeline: spark → plan → work → review → ship. Mission-control TUI, browser approval gates, autonomous autorecovery, and final handoff reports.",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -18,12 +18,12 @@
   "author": "morph contributors",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/morph"
+    "url": "git+https://github.com/boofpackdev/morph.git"
   },
   "bugs": {
-    "url": "https://github.com/your-org/morph/issues"
+    "url": "https://github.com/boofpackdev/morph/issues"
   },
-  "homepage": "https://github.com/your-org/morph#readme",
+  "homepage": "https://github.com/boofpackdev/morph#readme",
   "engines": {
     "node": ">=18.0.0"
   },

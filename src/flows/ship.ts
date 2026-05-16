@@ -110,33 +110,38 @@ You handle release communication:
 
 Keep the changelog clear and user-focused. No internal jargon.`;
 
-  const [devopsResult, consultantResult] = await Promise.all([
-    runAgent(devops, {
+  const [devopsOutput, consultantOutput] = await Promise.all([
+    blackboard.getFlowCheckpoint("ship", "devops") ? Promise.resolve(blackboard.getFlowCheckpoint("ship", "devops")!) : runAgent(devops, {
       cwd,
       task: `Prepare for release to ${target}:\n\n${shipContext}`,
       systemPrompt: devopsSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(devops.name, devops.role, "-", event),
-    }),
-    runAgent(releaseConsultant, {
+    }).then((result) => result.output || ""),
+    blackboard.getFlowCheckpoint("ship", "consultant") ? Promise.resolve(blackboard.getFlowCheckpoint("ship", "consultant")!) : runAgent(releaseConsultant, {
       cwd,
       task: `Generate release artifacts:\n\n${shipContext}`,
       systemPrompt: consultantSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(releaseConsultant.name, releaseConsultant.role, "-", event),
-    }),
+    }).then((result) => result.output || ""),
   ]);
 
-  for (const result of [devopsResult, consultantResult]) {
-    blackboard.addTokens("ship", estimateTokens(result.output || ""));
+  if (!blackboard.getFlowCheckpoint("ship", "devops")) {
+    blackboard.addTokens("ship", estimateTokens(devopsOutput));
+    blackboard.setFlowCheckpoint("ship", "devops", devopsOutput);
+  }
+  if (!blackboard.getFlowCheckpoint("ship", "consultant")) {
+    blackboard.addTokens("ship", estimateTokens(consultantOutput));
+    blackboard.setFlowCheckpoint("ship", "consultant", consultantOutput);
   }
 
   // ── Parse outputs ──
   const shipOutput = parseShipOutput(
-    devopsResult.output || "",
-    consultantResult.output || "",
+    devopsOutput,
+    consultantOutput,
     version
   );
 

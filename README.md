@@ -2,7 +2,7 @@
 
 **5-stage pipeline**: spark → plan → work → review → ship
 
-morph streamlines your workflow by orchestrating specialized agent teams through a complete software development lifecycle — all inside pi. It features **Autonomous Autorecovery**, allowing the pipeline to loop back and fix issues identified during code review without human intervention.
+morph streamlines your workflow by orchestrating specialized agent teams through a complete software development lifecycle — all inside pi. It combines a live mission-control TUI, browser approval gates, and **Autonomous Autorecovery**, allowing the pipeline to loop back and fix issues identified during code review without human intervention.
 
 ## Pipeline
 
@@ -15,6 +15,17 @@ morph streamlines your workflow by orchestrating specialized agent teams through
 | **Ship** | `/morph:ship` | DevOps + Release Consultant (2) | Release + Changelog |
 
 ## Key Features
+
+### Mission-Control TUI
+- Live phase dashboard with truthful progress semantics
+- Phase-specific operator panels for planning, work, review, and ship
+- Active-agent visibility with current tool/action context
+- Contextual footer hints for approvals, gates, and next actions
+
+### Browser Approval Gates
+- Review pre-work specs in the browser before implementation
+- Approve release transitions from either the browser or the pi session
+- Keep the interactive terminal flow and browser flow in sync
 
 ### Autonomous Autorecovery
 When a review is REJECTED, morph analyzes the findings and offers to autorecover. It will:
@@ -33,6 +44,14 @@ The Plan phase outputs a Directed Acyclic Graph of tasks. The Work phase execute
 - **Internal monologue stripping**: Reasoning blocks removed before handoff.
 - **Context sliding window**: Truncation on loops to prevent bloat.
 - **Diff-based patching**: Agents produce targeted edits, not full file rewrites.
+
+### Final Handoff Report
+After the Ship phase, morph generates final Markdown and HTML reports with:
+- project overview
+- implementation summary
+- quickstart guidance
+- release/version details
+- links back to key generated artifacts
 
 ## Installation
 

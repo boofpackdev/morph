@@ -16,7 +16,7 @@ import {
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
 import { formatDAG, topologicalSort } from "../core/engine.js";
-import type { PlanOutput, TaskNode } from "../schemas/contracts.js";
+import { TaskNodeSchema, type PlanOutput, type TaskNode } from "../schemas/contracts.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -87,16 +87,18 @@ Be exhaustive. This plan drives the entire implementation phase.`;
 
   const architectTask = `PRD:\n${prdContext}\n\nDesign the complete technical plan.`;
 
-  const architectResult = await runAgent(architect, {
+  const architectOutput = blackboard.getFlowCheckpoint("plan", "architect") || (await runAgent(architect, {
     cwd,
     task: architectTask,
     systemPrompt: architectSystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
-  });
-
-  blackboard.addTokens("plan", estimateTokens(architectResult.output || ""));
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("plan", "architect")) {
+    blackboard.addTokens("plan", estimateTokens(architectOutput));
+    blackboard.setFlowCheckpoint("plan", "architect", architectOutput);
+  }
 
   // ── Step 2: QA Expert and Efficiency Manager run in parallel ──
 
@@ -152,31 +154,33 @@ Produce:
 ### COST ESTIMATE
 [Rough estimate of implementation effort and compute cost]`;
 
-  const planText = architectResult.output || "";
+  const planText = architectOutput;
 
-  const qaResultActual = await runAgent(qaExpert, {
+  const qaOutput = blackboard.getFlowCheckpoint("plan", "qa") || (await runAgent(qaExpert, {
     cwd,
     task: `Architecture plan:\n${planText}\n\nReview for testability and QA strategy.`,
     systemPrompt: qaSystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(qaExpert.name, qaExpert.role, "-", event),
-  });
+  })).output || "";
 
-  const effResultActual = await runAgent(efficiencyMgr, {
+  const effOutput = blackboard.getFlowCheckpoint("plan", "efficiency") || (await runAgent(efficiencyMgr, {
     cwd,
     task: `Architecture plan:\n${planText}\n\nAnalyze for efficiency and optimization.`,
     systemPrompt: efficiencySystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(efficiencyMgr.name, efficiencyMgr.role, "-", event),
-  });
-
-  blackboard.addTokens("plan", estimateTokens(qaResultActual.output || ""));
-  blackboard.addTokens(
-    "plan",
-    estimateTokens(effResultActual.output || "")
-  );
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("plan", "qa")) {
+    blackboard.addTokens("plan", estimateTokens(qaOutput));
+    blackboard.setFlowCheckpoint("plan", "qa", qaOutput);
+  }
+  if (!blackboard.getFlowCheckpoint("plan", "efficiency")) {
+    blackboard.addTokens("plan", estimateTokens(effOutput));
+    blackboard.setFlowCheckpoint("plan", "efficiency", effOutput);
+  }
 
   // ── Step 3: Architect synthesizes final plan ──
   const synthesisSystemPrompt = `You are the **Lead Architect** for the morph orchestration pipeline.
@@ -241,21 +245,23 @@ Every component must have corresponding tasks. Every dependency must reference a
 Tasks must form a valid DAG (no cycles).
 Use the SAME targetDir for related work on the same deliverable. If the requested feature/site/app is meant to live in a subdirectory, place every related task in that subdirectory consistently rather than mixing root and nested paths.`;
 
-  const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaResultActual.output}\n\nEfficiency feedback:\n${effResultActual.output}\n\nSynthesize the FINAL plan.`;
+  const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaOutput}\n\nEfficiency feedback:\n${effOutput}\n\nSynthesize the FINAL plan.`;
 
-  const finalResult = await runAgent(architect, {
+  const finalOutput = blackboard.getFlowCheckpoint("plan", "synthesis") || (await runAgent(architect, {
     cwd,
     task: synthesisTask,
     systemPrompt: synthesisSystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
-  });
-
-  blackboard.addTokens("plan", estimateTokens(finalResult.output || ""));
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("plan", "synthesis")) {
+    blackboard.addTokens("plan", estimateTokens(finalOutput));
+    blackboard.setFlowCheckpoint("plan", "synthesis", finalOutput);
+  }
 
   // ── Parse output into structured PlanOutput ──
-  const planOutput = normalizePlanOutput(parsePlanOutput(finalResult.output || ""), cwd, sparkOutput);
+  const planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
 
   // Validate DAG
   try {
@@ -525,12 +531,81 @@ function normalizePlanOutput(
   const inferredDefaultTarget = inferDefaultTargetDir(cwd, spark);
   return {
     ...plan,
-    tasks: plan.tasks.map((task) => ({
-      ...task,
-      files: task.files?.length ? task.files : inferFilesForTask(task),
-      targetDir: normalizeTargetDir(task.targetDir, inferredDefaultTarget),
-    })),
+    tasks: plan.tasks.map((task, index) =>
+      normalizeTaskNode(task, index, inferredDefaultTarget)
+    ),
   };
+}
+
+function normalizeTaskNode(
+  task: TaskNode,
+  index: number,
+  inferredDefaultTarget: string
+): TaskNode {
+  const raw = task as TaskNode & Record<string, unknown>;
+  const normalizedDependsOn = normalizeDependsOn(raw.dependsOn);
+  const normalizedFiles = Array.isArray(raw.files)
+    ? raw.files.filter((file): file is string => typeof file === "string" && file.trim().length > 0)
+    : undefined;
+
+  const candidate = {
+    ...raw,
+    id: typeof raw.id === "string" && raw.id.trim() ? raw.id : `TASK-${String(index + 1).padStart(2, "0")}`,
+    description:
+      typeof raw.description === "string" && raw.description.trim()
+        ? raw.description
+        : `Implement task ${index + 1}`,
+    category: normalizeTaskCategory(raw.category),
+    dependsOn: normalizedDependsOn,
+    acceptanceCriteria:
+      typeof raw.acceptanceCriteria === "string"
+        ? raw.acceptanceCriteria
+        : "",
+    estimatedComplexity: normalizeTaskComplexity(raw.estimatedComplexity),
+    files: normalizedFiles,
+    targetDir: normalizeTargetDir(
+      typeof raw.targetDir === "string" ? raw.targetDir : undefined,
+      inferredDefaultTarget
+    ),
+  };
+
+  const parsed = TaskNodeSchema.safeParse(candidate);
+  if (parsed.success) {
+    return {
+      ...parsed.data,
+      files: parsed.data.files?.length ? parsed.data.files : inferFilesForTask(parsed.data),
+    };
+  }
+
+  const fallback = candidate as TaskNode;
+  return {
+    ...fallback,
+    files: normalizedFiles?.length ? normalizedFiles : inferFilesForTask(fallback),
+  };
+}
+
+function normalizeDependsOn(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((dep): dep is string => typeof dep === "string" && dep.trim().length > 0);
+  }
+  if (typeof value === "string") {
+    return value
+      .split(",")
+      .map((dep) => dep.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function normalizeTaskCategory(value: unknown): TaskNode["category"] {
+  const categories = new Set<TaskNode["category"]>(["db", "api", "ui", "config", "test", "docs", "infra", "other"]);
+  return typeof value === "string" && categories.has(value as TaskNode["category"])
+    ? value as TaskNode["category"]
+    : "other";
+}
+
+function normalizeTaskComplexity(value: unknown): TaskNode["estimatedComplexity"] {
+  return value === "low" || value === "medium" || value === "high" ? value : "medium";
 }
 
 function inferDefaultTargetDir(

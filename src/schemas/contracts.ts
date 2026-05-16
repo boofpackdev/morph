@@ -186,6 +186,7 @@ export const MorphStateSchema = z.object({
     })
     .default({}),
   startedAt: z.string().optional(),
+  pipelinePrompt: z.string().optional(),
   sparkOutput: SparkOutputSchema.optional(),
   planOutput: PlanOutputSchema.optional(),
   workResults: z.array(WorkTaskResultSchema).default([]),
@@ -202,6 +203,7 @@ export const MorphStateSchema = z.object({
     })
     .default({}),
   activeAgents: z.array(z.string()).default([]),
+  flowCheckpoints: z.record(z.string(), z.record(z.string(), z.string())).default({}),
   retries: z.record(z.string(), z.number()).default({}),
   decisions: z
     .array(

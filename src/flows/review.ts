@@ -127,35 +127,44 @@ Happy / Neutral / Frustrated — and why
 
 Be brutally honest. You're the customer, not a developer.`;
 
-  const [qaResult, perfResult, userResult] = await Promise.all([
-    runAgent(qaAuditor, {
+  const [qaOutput, perfOutput, userOutput] = await Promise.all([
+    blackboard.getFlowCheckpoint("review", "qa") ? Promise.resolve(blackboard.getFlowCheckpoint("review", "qa")!) : runAgent(qaAuditor, {
       cwd,
       task: `Review the implementation:\n\n${reviewContext}${focusInstruction}`,
       systemPrompt: qaSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(qaAuditor.name, qaAuditor.role, "-", event),
-    }),
-    runAgent(perfGuru, {
+    }).then((result) => result.output || ""),
+    blackboard.getFlowCheckpoint("review", "perf") ? Promise.resolve(blackboard.getFlowCheckpoint("review", "perf")!) : runAgent(perfGuru, {
       cwd,
       task: `Analyze performance:\n\n${reviewContext}${focusInstruction}`,
       systemPrompt: perfSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(perfGuru.name, perfGuru.role, "-", event),
-    }),
-    runAgent(endUser, {
+    }).then((result) => result.output || ""),
+    blackboard.getFlowCheckpoint("review", "user") ? Promise.resolve(blackboard.getFlowCheckpoint("review", "user")!) : runAgent(endUser, {
       cwd,
       task: `Evaluate as an end user:\n\nPRD Vision: ${sparkOutput.visionStatement}\n\nFeatures: ${sparkOutput.coreFeatures.join(", ")}\n\nTarget User: ${sparkOutput.targetUserPersona}${focusInstruction}`,
       systemPrompt: endUserSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(endUser.name, endUser.role, "-", event),
-    }),
+    }).then((result) => result.output || ""),
   ]);
 
-  for (const result of [qaResult, perfResult, userResult]) {
-    blackboard.addTokens("review", estimateTokens(result.output || ""));
+  if (!blackboard.getFlowCheckpoint("review", "qa")) {
+    blackboard.addTokens("review", estimateTokens(qaOutput));
+    blackboard.setFlowCheckpoint("review", "qa", qaOutput);
+  }
+  if (!blackboard.getFlowCheckpoint("review", "perf")) {
+    blackboard.addTokens("review", estimateTokens(perfOutput));
+    blackboard.setFlowCheckpoint("review", "perf", perfOutput);
+  }
+  if (!blackboard.getFlowCheckpoint("review", "user")) {
+    blackboard.addTokens("review", estimateTokens(userOutput));
+    blackboard.setFlowCheckpoint("review", "user", userOutput);
   }
 
   // ── Tech Lead synthesizes final review ──
@@ -199,27 +208,27 @@ For each change needed, specify:
 - Be specific and actionable
 - Every issue must have a suggestion for fixing it`;
 
-  const techLeadTask = `Implementation context:\n${reviewContext}\n\nQA Audit:\n${qaResult.output}\n\nPerformance Assessment:\n${perfResult.output}\n\nEnd User Perspective:\n${userResult.output}\n\nSynthesize the final review with verdict.`;
-const techLeadResult = await runAgent(techLead, {
+  const techLeadTask = `Implementation context:\n${reviewContext}\n\nQA Audit:\n${qaOutput}\n\nPerformance Assessment:\n${perfOutput}\n\nEnd User Perspective:\n${userOutput}\n\nSynthesize the final review with verdict.`;
+const techLeadOutput = blackboard.getFlowCheckpoint("review", "techLead") || (await runAgent(techLead, {
   cwd,
   task: techLeadTask,
   systemPrompt: techLeadSystemPrompt,
   signal,
   blackboard,
   onEvent: (event) => onAgentEvent?.(techLead.name, techLead.role, "-", event),
-});
+})).output || "";
 
-  blackboard.addTokens(
-    "review",
-    estimateTokens(techLeadResult.output || "")
-  );
+  if (!blackboard.getFlowCheckpoint("review", "techLead")) {
+    blackboard.addTokens("review", estimateTokens(techLeadOutput));
+    blackboard.setFlowCheckpoint("review", "techLead", techLeadOutput);
+  }
 
   // ── Parse output ──
   const reviewOutput = parseReviewOutput(
-    techLeadResult.output || "",
-    qaResult.output || "",
-    perfResult.output || "",
-    userResult.output || ""
+    techLeadOutput,
+    qaOutput,
+    perfOutput,
+    userOutput
   );
 
   // Record decisions

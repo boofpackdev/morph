@@ -28,6 +28,7 @@ import {
   type TaskDisplay,
   type AgentActivity,
   type SubagentActivity,
+  type FileActivity,
   type PhaseContext,
   buildPipelineProgressWidget,
   buildTaskTracker,
@@ -36,33 +37,6 @@ import {
 import { startMorphServer, serverEvents } from "./server/server.js";
 import type { Server } from "node:http";
 import type { PlanOutput, SparkOutput } from "./schemas/contracts.js";
-
-async function waitConfirm(ctx: any, title: string, desc: string, phase: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let resolved = false;
-
-    // Web UI approval listener
-    const onApprove = (p: string) => {
-      if (p === phase && !resolved) {
-        resolved = true;
-        serverEvents.removeListener("approve", onApprove);
-        ctx.ui.notify(`✅ Approved via Web UI`, "success" as any);
-        resolve(true);
-      }
-    };
-    serverEvents.on("approve", onApprove);
-
-    // Terminal confirmation
-    ctx.ui.confirm(title, desc).then((proceed: boolean) => {
-      if (!resolved) {
-        resolved = true;
-        serverEvents.removeListener("approve", onApprove);
-        resolve(proceed);
-      }
-    });
-  });
-}
-
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
@@ -557,10 +531,57 @@ export default function (pi: ExtensionAPI) {
   let blackboard: Blackboard | null = null;
   let currentAbortController: AbortController | null = null;
   let currentTick = 0;
+  let currentStatus: PipelineDisplay["status"] = "ready";
+  let currentHint: string | undefined;
   let animationInterval: NodeJS.Timeout | null = null;
   let requestAnimationRender: (() => void) | null = null;
   let webServer: Server | null = null;
   const subagentActivities = new Map<string, SubagentActivity>();
+  const activeFileActivities = new Map<string, FileActivity>();
+  const recentFileActivities: FileActivity[] = [];
+
+  function setCurrentStatus(status: PipelineDisplay["status"], hint?: string): void {
+    currentStatus = status;
+    currentHint = hint;
+  }
+
+  async function waitConfirm(ctx: any, title: string, desc: string, phase: string): Promise<boolean> {
+    const previousStatus = currentStatus;
+    const previousHint = currentHint;
+    currentStatus = "waiting";
+    currentHint = "approval needed  |  browser or Pi";
+    updateWidget(ctx);
+
+    return new Promise((resolve) => {
+      let resolved = false;
+
+      // Web UI approval listener
+      const onApprove = (p: string) => {
+        if (p === phase && !resolved) {
+          resolved = true;
+          serverEvents.removeListener("approve", onApprove);
+          ctx.ui.notify(`Approved via Web UI`, "success" as any);
+          currentStatus = previousStatus;
+          currentHint = previousHint;
+          updateWidget(ctx);
+          resolve(true);
+        }
+      };
+      serverEvents.on("approve", onApprove);
+
+      // Terminal confirmation
+      ctx.ui.confirm(title, desc).then((proceed: boolean) => {
+        if (!resolved) {
+          resolved = true;
+          serverEvents.removeListener("approve", onApprove);
+          currentStatus = previousStatus;
+          currentHint = previousHint;
+          updateWidget(ctx);
+          resolve(proceed);
+        }
+      });
+    });
+  }
 
   function getBB(): Blackboard {
     if (!blackboard) blackboard = new Blackboard(process.cwd());
@@ -571,12 +592,16 @@ export default function (pi: ExtensionAPI) {
     blackboard = null;
     currentAbortController?.abort();
     currentAbortController = null;
+    activeFileActivities.clear();
+    recentFileActivities.length = 0;
   }
 
   function deletePipelineState(cwd: string): void {
     currentAbortController?.abort();
     currentAbortController = null;
     blackboard = null;
+    activeFileActivities.clear();
+    recentFileActivities.length = 0;
     fs.rmSync(getMorphDir(cwd), { recursive: true, force: true });
   }
 
@@ -653,9 +678,18 @@ export default function (pi: ExtensionAPI) {
     const markdownPath = path.join(morphDir, "work-spec.md");
     const htmlPath = path.join(morphDir, "work-approval.html");
 
+    const previousStatus = currentStatus;
+    const previousHint = currentHint;
+    currentStatus = "waiting";
+    currentHint = "approve work spec  |  browser or Pi";
+    updateWidget(ctx);
+
     const edited = await ctx.ui.editor("Review/edit WORK specification before implementation", draftMarkdown);
     if (edited === undefined) {
       ctx.ui.notify("WORK paused. Re-run /morph:run or /morph:work when ready.", "info");
+      setCurrentStatus("ready");
+      currentHint = "work paused  |  /morph:run";
+      updateWidget(ctx);
       return false;
     }
 
@@ -666,7 +700,7 @@ export default function (pi: ExtensionAPI) {
     ensureWebServer();
     openFileInBrowser(htmlPath);
 
-    pi.sendMessage({ customType: "morph", content: `# 🧭 Pre-Work Specification Review
+    pi.sendMessage({ customType: "morph", content: `# Pre-Work Specification Review
 
 Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from the pi prompt to begin WORK.`, display: true, details: { phase: "pre-work", htmlPath, markdownPath } });
 
@@ -679,6 +713,11 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       ).then((approved: boolean) => approved ? "approve" as const : "reject" as const),
     ]);
     browserDecision.dispose();
+
+    currentStatus = previousStatus;
+    currentHint = previousHint;
+    updateWidget(ctx);
+
     if (decision === "reject") {
       ctx.ui.notify("WORK paused before implementation. Re-run /morph:run or /morph:work when ready.", "info");
       return false;
@@ -733,12 +772,16 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
     return {
       phase: state.phase,
+      status: currentStatus,
       tasks,
       agents,
       tokenLedger: state.tokenLedger,
       tick: currentTick,
       subagentActivities: liveSubs.length > 0 ? liveSubs : undefined,
+      fileActivities: [...activeFileActivities.values(), ...recentFileActivities].slice(0, 6),
       phaseContext: buildPhaseContext(state, tasks, liveSubs),
+      footerHint: currentHint,
+      restoredCheckpointCount: Object.keys(state.flowCheckpoints[state.phase] || {}).length,
     };
   }
 
@@ -755,6 +798,43 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
   function clearSubagentActivity(name: string): void {
     subagentActivities.delete(name);
+    activeFileActivities.delete(name);
+  }
+
+  function countFileLines(filePath: string): number | undefined {
+    try {
+      if (!fs.existsSync(filePath)) return 0;
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile() || stat.size > 1_000_000) return undefined;
+      const content = fs.readFileSync(filePath, "utf-8");
+      if (!content) return 0;
+      return content.split(/\r?\n/).length;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function resolveActivityPath(rawPath: unknown, taskId?: string): { displayPath: string; absolutePath: string } | null {
+    if (typeof rawPath !== "string" || !rawPath.trim()) return null;
+    const taskTargetDir =
+      taskId && taskId !== "-"
+        ? getBB().getState().planOutput?.tasks.find((task) => task.id === taskId)?.targetDir
+        : undefined;
+    const baseDir = taskTargetDir ? path.resolve(process.cwd(), taskTargetDir) : process.cwd();
+    const absolutePath = path.isAbsolute(rawPath) ? rawPath : path.resolve(baseDir, rawPath);
+    const displayPath = path.relative(process.cwd(), absolutePath) || path.basename(absolutePath);
+    return { displayPath, absolutePath };
+  }
+
+  function pushRecentFileActivity(activity: FileActivity): void {
+    recentFileActivities.unshift(activity);
+    recentFileActivities.splice(5);
+  }
+
+  function countTextLines(value: unknown): number | undefined {
+    if (typeof value !== "string") return undefined;
+    if (!value) return 0;
+    return value.split(/\r?\n/).length;
   }
 
   function buildPhaseContext(
@@ -764,7 +844,27 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   ): PhaseContext | undefined {
     const activeAgents = liveSubs.length;
     const liveNames = new Set(liveSubs.map((agent) => agent.name));
-    const agentMark = (name: string) => liveNames.has(name) ? "●" : "○";
+    const checkpoints = state.flowCheckpoints[state.phase] || {};
+    const checkpointKeys = new Set(Object.keys(checkpoints));
+    const restoredMark = "↺";
+    const agentCheckpointKey: Record<string, string> = {
+      visionary: state.phase === "spark" ? "visionary" : "",
+      critic: state.phase === "spark" ? "critic" : "",
+      architect: state.phase === "plan" ? "architect" : "",
+      "qa-expert": state.phase === "plan" ? "qa" : "",
+      "efficiency-mgr": state.phase === "plan" ? "efficiency" : "",
+      "qa-auditor": state.phase === "review" ? "qa" : "",
+      "perf-guru": state.phase === "review" ? "perf" : "",
+      "end-user": state.phase === "review" ? "user" : "",
+      "tech-lead": state.phase === "review" ? "techLead" : "",
+      "devops-sre": state.phase === "ship" ? "devops" : "",
+      "release-consultant": state.phase === "ship" ? "consultant" : "",
+    };
+    const agentMark = (name: string) => {
+      const checkpoint = agentCheckpointKey[name];
+      if (checkpoint && checkpointKeys.has(checkpoint)) return restoredMark;
+      return liveNames.has(name) ? "●" : "○";
+    };
     const compactTask = (task: TaskDisplay) =>
       `${task.status === "done" ? "✓" : task.status === "running" ? "●" : task.status === "failed" || task.status === "blocked" ? "!" : "○"} ${task.id}`;
     const runningTasks = tasks.filter((task) => task.status === "running");
@@ -776,6 +876,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       case "spark":
         return { title: "SPARK BOARD", lines: [
           `Visionary ${agentMark("visionary")}  ->  Critic ${agentMark("critic")}`,
+          checkpointKeys.size > 0 ? `restored ${[...checkpointKeys].join(", ")}` : "restored —",
           state.sparkOutput ? `features ${state.sparkOutput.coreFeatures.length}  ·  risks ${state.sparkOutput.risks.length}` : "shaping PRD  ·  pressure-testing idea",
           state.sparkOutput?.technicalStackRecommendation ? `stack -> ${state.sparkOutput.technicalStackRecommendation}` : "next -> synthesize final PRD",
         ]};
@@ -783,6 +884,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         return { title: "PLAN BOARD", lines: [
           `Architect ${agentMark("architect")}`,
           `QA ${agentMark("qa-expert")}  +  Efficiency ${agentMark("efficiency-mgr")}`,
+          checkpointKeys.size > 0 ? `restored ${[...checkpointKeys].join(", ")}` : "restored —",
           state.planOutput ? `${state.planOutput.tasks.length} tasks  ·  ${waveGroups(state.planOutput.tasks).length} waves` : "building architecture + DAG",
           state.planOutput ? `next -> work spec (${state.planOutput.estimatedEffort})` : "next -> specialist review",
         ]};
@@ -808,6 +910,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           `QA       ${agentMark("qa-auditor")}────┐`,
           `PERF     ${agentMark("perf-guru")}────┼──> LEAD ${agentMark("tech-lead")}`,
           `USER     ${agentMark("end-user")}────┘`,
+          checkpointKeys.size > 0 ? `RESTORED ${[...checkpointKeys].join(", ")}` : "RESTORED —",
           review ? `VERDICT  ${review.status}  ·  score ${review.efficiencyScore}/10` : "VERDICT  waiting on synthesis",
           review ? `FINDINGS ${severities.critical} critical  ${severities.major} major  ${severities.minor} minor` : `NEXT     ${activeAgents > 0 ? "auditors active" : "awaiting auditors"}`,
         ]};
@@ -815,6 +918,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       case "ship":
         return { title: "SHIP BOARD", lines: [
           `DevOps ${agentMark("devops-sre")}  ->  Release ${agentMark("release-consultant")}`,
+          checkpointKeys.size > 0 ? `restored ${[...checkpointKeys].join(", ")}` : "restored —",
           state.shipOutput ? `${state.shipOutput.status}  ·  v${state.shipOutput.version}` : "preparing release package",
           state.reviewOutput ? `review -> ${state.reviewOutput.status}` : "review -> pending",
         ]};
@@ -840,14 +944,60 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         if (event.text?.trim()) entry.lastAction = event.text.trim();
         break;
       case "tool_use": {
-        entry.currentTool = event.name || "";
+        entry.currentTool = String(event.name || "").toLowerCase();
         const args = event.input || event.args || {};
-        entry.toolDetail = typeof args === "object" ? args.path || args.filePath || args.command || args.pattern || args.query || "" : String(args).slice(0, 40);
+        entry.toolDetail = typeof args === "object" ? args.path || args.filePath || args.file_path || args.command || args.pattern || args.query || "" : String(args).slice(0, 40);
+        const operation = entry.currentTool;
+        if (operation === "read" || operation === "edit" || operation === "write") {
+          const activityPath = resolveActivityPath(args.path || args.filePath || args.file_path, taskId);
+          if (activityPath) {
+            const beforeLines = countFileLines(activityPath.absolutePath);
+            const oldTextLines = countTextLines(args.oldText ?? args.old_string ?? args.old);
+            const newTextLines = countTextLines(args.newText ?? args.new_string ?? args.new ?? args.content);
+            const predictedDelta =
+              operation === "edit" && oldTextLines !== undefined && newTextLines !== undefined
+                ? newTextLines - oldTextLines
+                : operation === "write" && beforeLines !== undefined && newTextLines !== undefined
+                  ? newTextLines - beforeLines
+                  : undefined;
+            activeFileActivities.set(agentName, {
+              agentName,
+              role,
+              path: activityPath.displayPath,
+              absolutePath: activityPath.absolutePath,
+              operation,
+              beforeLines,
+              afterLines:
+                beforeLines !== undefined && predictedDelta !== undefined
+                  ? beforeLines + predictedDelta
+                  : undefined,
+              delta: predictedDelta,
+              status: "active",
+            });
+          }
+        }
         break;
       }
       case "tool_result":
+      case "tool_result_end": {
+        const activity = activeFileActivities.get(agentName);
+        if (activity) {
+          const afterLines = activity.absolutePath ? countFileLines(activity.absolutePath) : undefined;
+          const finished: FileActivity = {
+            ...activity,
+            afterLines,
+            delta:
+              activity.beforeLines !== undefined && afterLines !== undefined
+                ? afterLines - activity.beforeLines
+                : undefined,
+            status: "done",
+          };
+          activeFileActivities.delete(agentName);
+          pushRecentFileActivity(finished);
+        }
         if (event.content?.[0]?.text) entry.lastAction = event.content[0].text.slice(0, 60).replace(/\n/g, " ");
         break;
+      }
       case "message_end":
         entry.turns++;
         entry.currentTool = "";
@@ -886,18 +1036,26 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   // ── Session lifecycle ──
   pi.on("session_start", async (_event, ctx) => {
     const bb = getBB();
-    const state = bb.getState();
+    let state = bb.getState();
+
+    if (state.activeAgents.length > 0) {
+      bb.clearActiveAgents();
+      state = bb.getState();
+    }
 
     // Default to the parent session's active model if no morph config is set.
     ensureDefaultModelConfig(ctx as any);
 
     if (state.phase !== "idle") {
+      const checkpoints = Object.keys(state.flowCheckpoints[state.phase] || {}).length;
       ctx.ui.notify(
-        `morph pipeline at phase: ${state.phase} — /morph:status for details, /morph:reset to restart`,
+        checkpoints > 0
+          ? `morph pipeline restored at phase: ${state.phase} (${checkpoints} checkpoint${checkpoints === 1 ? "" : "s"}) — /morph:run to resume`
+          : `morph pipeline at phase: ${state.phase} — /morph:status for details, /morph:reset to restart`,
         "info"
       );
     } else {
-      ctx.ui.notify("🚀 morph — Type /morph:run <idea> to start your project", "info");
+      ctx.ui.notify("morph — Type /morph:run <idea> to start your project", "info");
     }
 
     // Start animation loop
@@ -989,19 +1147,20 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
 
       bb.transition("plan");
+      setCurrentStatus("busy");
       updateWidget(ctx as any);
-      ctx.ui.setStatus("morph", "morph:plan ⏳  Architect designing...");
+      ctx.ui.setStatus("morph", "morph:plan Architect designing...");
       ctx.ui.notify("Plan: Architect + QA + Efficiency Manager working...", "info");
 
       try {
         currentAbortController = new AbortController();
 
         // Stage 1: Architect
-        ctx.ui.setStatus("morph", "morph:plan ⏳  Architect → architecture + tasks");
+        ctx.ui.setStatus("morph", "morph:plan Architect -> architecture + tasks");
         updateWidget(ctx as any);
 
         // Stage 2: QA + Efficiency (parallel) — status updates
-        ctx.ui.setStatus("morph", "morph:plan ⏳  QA + Efficiency reviewing...");
+        ctx.ui.setStatus("morph", "morph:plan QA + Efficiency reviewing...");
 
         const planOutput = await executePlanFlow({
           cwd: ctx.cwd,
@@ -1019,14 +1178,15 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         const dagText = formatDAG(planOutput.tasks);
         const estTokens = estimatePhaseTokens(planOutput.tasks);
 
+        setCurrentStatus("ready");
         ctx.ui.setStatus(
           "morph",
-          `morph:work (ready) ✓  ${planOutput.tasks.length} tasks, ${waves.length} waves`
+          `morph:work (ready) [DONE] ${planOutput.tasks.length} tasks, ${waves.length} waves`
         );
         updateWidget(ctx as any);
 
         const summary = [
-          `# 📋 Plan Complete`,
+          `# Plan Complete`,
           ``,
           `**${planOutput.tasks.length} tasks** in **${waves.length} waves**  •  ~${formatTokens(estTokens)} est. tokens`,
           ``,
@@ -1039,7 +1199,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           ``,
           dagText,
           ``,
-          `State → \`.morph/state.json\`  •  Next → /morph:work`,
+          `State -> \`.morph/state.json\`  •  Next -> /morph:work`,
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "plan" } });
@@ -1048,7 +1208,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             "success" as any
           );
       } catch (err: any) {
-        ctx.ui.setStatus("morph", `morph:plan ✗  ${err.message.slice(0, 40)}`);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:plan FAILED ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
         ctx.ui.notify(`Plan failed: ${err.message}`, "error");
       }
@@ -1087,6 +1248,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
 
       bb.transition("work");
+      setCurrentStatus("busy");
       const display = buildPipelineDisplay();
       ctx.ui.setStatus("morph", buildStatusBar(display));
       setPipelineWidget(ctx as any, () => buildPipelineDisplay());
@@ -1117,12 +1279,20 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
 
             const waveTasks = wave
-              .map((t) => `  ○ [${t.id}] ${t.description.slice(0, 60)} (${t.estimatedComplexity})`)
+              .map((t) => `  [${t.id}] ${t.description.slice(0, 60)} (${t.estimatedComplexity})`)
               .join("\n");
+            
+            const previousHint = currentHint;
+            currentStatus = "waiting";
+            currentHint = "wave approval  |  respond in Pi";
+            updateWidget(ctx as any);
             const proceed = await ctx.ui.confirm(
-              `🌊 Wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}`,
+              `Wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}`,
               `${wave.length} task(s):\n${waveTasks}\n\nExecute this wave?`
             );
+            setCurrentStatus("busy");
+            currentHint = previousHint;
+            updateWidget(ctx as any);
             return proceed;
           },
 
@@ -1139,10 +1309,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             // Update status bar
             const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
             const total = liveTasks.size;
-            ctx.ui.setStatus("morph", `morph:work ⏳  ${done}/${total} tasks  ●●●`);
+            ctx.ui.setStatus("morph", `morph:work ${done}/${total} tasks running...`);
 
             // Per-task notification
-            const icon = result.status === "done" ? "✓" : result.status === "blocked" ? "⊘" : "✗";
+            const icon = result.status === "done" ? "[DONE]" : result.status === "blocked" ? "[BLOCKED]" : "[FAILED]";
             ctx.ui.notify(
               `${icon} [${result.taskId}] ${result.summary.slice(0, 80)}`,
               result.status === "done" ? "info" : "warning"
@@ -1161,18 +1331,19 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         const done = results.filter((r) => r.status === "done").length;
         const failed = results.filter((r) => r.status === "failed").length;
 
-        ctx.ui.setStatus("morph", `morph:review (ready) ✓  ${done}/${results.length} done`);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:review (ready) [DONE] ${done}/${results.length} done`);
         setPipelineWidget(ctx as any, () => buildPipelineDisplay());
 
         const progressText = formatProgress(results, state.planOutput!.tasks);
         const summary = [
-          `# 🔨 Work Complete`,
+          `# Work Complete`,
           ``,
           `**${done} done**  •  ${failed} failed`,
           ``,
           progressText,
           ``,
-          `State → \`.morph/state.json\`  •  Next → /morph:review`,
+          `State -> \`.morph/state.json\`  •  Next -> /morph:review`,
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "work" } });
@@ -1181,7 +1352,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             (done === results.length ? "success" : "warning") as any
           );
       } catch (err: any) {
-        ctx.ui.setStatus("morph", `morph:work ✗  ${err.message.slice(0, 40)}`);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:work FAILED ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
         ctx.ui.notify(`Work failed: ${err.message}`, "error");
       }
@@ -1203,15 +1375,16 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
 
       bb.transition("review");
+      setCurrentStatus("busy");
       updateWidget(ctx as any);
-      ctx.ui.setStatus("morph", "morph:review ⏳  4 reviewers auditing...");
+      ctx.ui.setStatus("morph", "morph:review 4 reviewers auditing...");
       ctx.ui.notify("Review: Tech Lead + QA Auditor + Performance Guru + End User...", "info");
 
       try {
         currentAbortController = new AbortController();
 
         // Stage updates as agents run
-        ctx.ui.setStatus("morph", "morph:review ⏳  QA + Perf + User reviewing (parallel)...");
+        ctx.ui.setStatus("morph", "morph:review QA + Perf + User reviewing...");
 
         const reviewOutput = await executeReviewFlow({
           cwd: ctx.cwd,
@@ -1225,20 +1398,20 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         });
         subagentActivities.clear();
 
-        ctx.ui.setStatus("morph", "morph:review ⏳  Tech Lead synthesizing verdict...");
+        ctx.ui.setStatus("morph", "morph:review Tech Lead synthesizing verdict...");
 
         // Done
-        const verdictIcon = reviewOutput.status === "APPROVED" ? "✅" : reviewOutput.status === "REJECTED" ? "❌" : "🔧";
+        setCurrentStatus("ready");
         ctx.ui.setStatus(
           "morph",
           reviewOutput.status === "APPROVED"
-            ? "morph:ship (ready) ✓"
-            : `morph:work (fixes needed) ${verdictIcon}`
+            ? "morph:ship (ready) [DONE]"
+            : `morph:work (fixes needed) [${reviewOutput.status}]`
         );
         updateWidget(ctx as any);
 
         const summary = [
-          `# ${verdictIcon} Review — ${reviewOutput.status}`,
+          `# Review — ${reviewOutput.status}`,
           ``,
           `**Score**: ${reviewOutput.efficiencyScore}/10`,
           ``,
@@ -1260,8 +1433,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             : `**Security**: No issues found`,
           ``,
           reviewOutput.status === "APPROVED"
-            ? `State → \`.morph/state.json\`  •  Next → /morph:ship`
-            : `State → \`.morph/state.json\`  •  Fix issues and re-run /morph:review`,
+            ? `State -> \`.morph/state.json\`  •  Next -> /morph:ship`
+            : `State -> \`.morph/state.json\`  •  Fix issues and re-run /morph:review`,
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "review" } });
@@ -1272,7 +1445,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
           );
       } catch (err: any) {
-        ctx.ui.setStatus("morph", `morph:review ✗  ${err.message.slice(0, 40)}`);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:review FAILED ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
         ctx.ui.notify(`Review failed: ${err.message}`, "error");
       }
@@ -1294,14 +1468,15 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
 
       bb.transition("ship");
+      setCurrentStatus("busy");
       updateWidget(ctx as any);
-      ctx.ui.setStatus("morph", "morph:ship ⏳  DevOps verifying...");
+      ctx.ui.setStatus("morph", "morph:ship DevOps verifying...");
       ctx.ui.notify("Ship: DevOps + Release Consultant preparing release...", "info");
 
       try {
         currentAbortController = new AbortController();
 
-        ctx.ui.setStatus("morph", "morph:ship ⏳  DevOps + Consultant (parallel)...");
+        ctx.ui.setStatus("morph", "morph:ship DevOps + Consultant...");
 
         const shipOutput = await executeShipFlow({
           cwd: ctx.cwd,
@@ -1317,9 +1492,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         const report = writeFinalReportArtifacts(ctx);
         openFileInBrowser(report.htmlPath);
 
-        const icon = shipOutput.status === "SHIPPED" ? "🚀" : "⛔";
-        ctx.ui.setStatus("morph", `morph:done ${icon}  v${shipOutput.version}`);
-        ctx.ui.setWidget("morph", ["✅  morph pipeline complete!", `   Version: ${shipOutput.version}  •  Status: ${shipOutput.status}`]);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:done [DONE] v${shipOutput.version}`);
+        ctx.ui.setWidget("morph", ["[DONE] morph pipeline complete!", `   Version: ${shipOutput.version}  •  Status: ${shipOutput.status}`]);
 
         const costBreakdown = [
           `  Spark:  ${formatTokens(finalState.tokenLedger?.spark || 0)}`,
@@ -1332,7 +1507,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         ].join("\n");
 
         const summary = [
-          `# ${icon} Shipped — v${shipOutput.version}`,
+          `# Shipped — v${shipOutput.version}`,
           ``,
           `**Status**: ${shipOutput.status}`,
           ``,
@@ -1351,13 +1526,14 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           `- Markdown: \`${report.markdownPath}\``,
           `- HTML: \`${report.htmlPath}\``,
           ``,
-          `🎉 Pipeline complete!`,
+          `Pipeline complete!`,
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "ship" } });
         ctx.ui.notify(`Shipped v${shipOutput.version}! Pipeline complete.`, "success" as any);
       } catch (err: any) {
-        ctx.ui.setStatus("morph", `morph:ship ✗  ${err.message.slice(0, 40)}`);
+        setCurrentStatus("ready");
+        ctx.ui.setStatus("morph", `morph:ship FAILED ${err.message.slice(0, 40)}`);
         ctx.ui.setWidget("morph", undefined);
         ctx.ui.notify(`Ship failed: ${err.message}`, "error");
       }
@@ -1368,36 +1544,34 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   // GUIDED PIPELINE
   // ═══════════════════════════════════════════
 
-  pi.registerCommand("morph:run", {
-    description: "Run the full pipeline with review gates: spark → plan → work → review → ship",
-    handler: async (args, ctx) => {
+  const runMorphPipeline = async (args: string, ctx: any) => {
       const bb = getBB();
       let state = bb.getState();
 
-      // ── Handle stuck/failed phases ──
-      if (state.phase === "spark") {
-        ctx.ui.notify("⚠️  Spark phase failed or was interrupted. Run /morph:reset to restart.", "warning");
-        return;
-      }
-
       while (state.phase !== "done") {
         // ── Determine starting point ──
-        if (state.phase === "idle") {
-          if (!args?.trim()) {
+        if (state.phase === "idle" || state.phase === "spark") {
+          const prompt = args?.trim() || state.pipelinePrompt?.trim();
+          if (!prompt) {
             ctx.ui.notify("Usage: /morph:run <your idea> to start a new pipeline", "error");
             return;
           }
-          // Spark - run it first
-          bb.transition("spark");
+          if (state.phase === "idle") {
+            bb.setPipelinePrompt(prompt);
+            bb.transition("spark");
+          } else {
+            ctx.ui.notify("Restoring interrupted Spark phase from checkpoint...", "info");
+          }
+          setCurrentStatus("busy");
           updateWidget(ctx as any);
-          ctx.ui.setStatus("morph", "morph:run ⏳  Spark phase...");
-          ctx.ui.notify("🚀 morph pipeline started! Beginning Spark phase...", "info");
+          ctx.ui.setStatus("morph", "morph:run Spark phase...");
+          ctx.ui.notify("morph pipeline started! Beginning Spark phase...", "info");
 
           try {
             currentAbortController = new AbortController();
             const sparkOutput = await executeSparkFlow({
               cwd: ctx.cwd,
-              prompt: args,
+              prompt,
               blackboard: bb,
               signal: currentAbortController.signal,
               onAgentEvent: (agentName, role, taskId, event) => {
@@ -1409,13 +1583,14 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             bb.setSparkOutput(sparkOutput);
             state = bb.getState();
 
-            ctx.ui.setStatus("morph", "morph:run ✓  Spark complete");
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", "morph:run Spark complete");
             updateWidget(ctx as any);
-            ctx.ui.notify("💡 Spark complete! Review summary below.", "success" as any);
+            ctx.ui.notify("Spark complete! Review summary below.", "success" as any);
 
             // Gate: Spark → Plan
             const sparkSummary = [
-              `# ✨ Spark Complete`,
+              `# Spark Complete`,
               ``,
               `**Vision**: ${sparkOutput.visionStatement.slice(0, 300)}`,
               ``,
@@ -1436,7 +1611,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
             const proceed = await waitConfirm(
               ctx,
-              "💡 Proceed to Plan phase?",
+              "Proceed to Plan phase?",
               "Review the Spark output in chat. Confirm to continue.",
               "spark"
             );
@@ -1445,7 +1620,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
               return;
             }
           } catch (err: any) {
-            ctx.ui.setStatus("morph", `morph:run ✗  Spark failed: ${err.message.slice(0, 40)}`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run Spark failed: ${err.message.slice(0, 40)}`);
             ctx.ui.notify(`Spark failed: ${err.message}`, "error");
             return;
           }
@@ -1453,8 +1629,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
         // ── Plan ──
         if (state.phase === "plan") {
-            ctx.ui.setStatus("morph", "morph:run ⏳  Plan phase...");
-            ctx.ui.notify("📋 Plan: Architect + QA + Efficiency working...", "info");
+            setCurrentStatus("busy");
+            ctx.ui.setStatus("morph", "morph:run Plan phase...");
+            ctx.ui.notify("Plan: Architect + QA + Efficiency working...", "info");
             updateWidget(ctx as any);
 
             try {
@@ -1473,13 +1650,14 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
               state = bb.getState();
 
               const waves = waveGroups(planOutput.tasks);
-              ctx.ui.setStatus("morph", `morph:run ✓  ${planOutput.tasks.length} tasks planned`);
+              setCurrentStatus("ready");
+              ctx.ui.setStatus("morph", `morph:run ${planOutput.tasks.length} tasks planned`);
               updateWidget(ctx as any);
-              ctx.ui.notify("📋 Plan complete! Review below.", "success" as any);
+              ctx.ui.notify("Plan complete! Review below.", "success" as any);
 
               // Gate: Plan → Work
               const planSummary = [
-                `# 📋 Plan Complete`,
+                `# Plan Complete`,
                 ``,  
                 `**${planOutput.tasks.length} tasks** in **${waves.length} waves**`,
                 ``,  
@@ -1501,7 +1679,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                 return;
               }
             } catch (err: any) {
-              ctx.ui.setStatus("morph", `morph:run ✗  Plan failed: ${err.message.slice(0, 40)}`);
+              setCurrentStatus("ready");
+              ctx.ui.setStatus("morph", `morph:run Plan failed: ${err.message.slice(0, 40)}`);
               ctx.ui.notify(`Plan failed: ${err.message}`, "error");
               return;
             }
@@ -1517,8 +1696,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             // git unavailable — skip
           }
 
-          ctx.ui.setStatus("morph", "morph:run ⏳  Work phase...");
-          ctx.ui.notify("🔨 Work: executing task DAG...", "info");
+          setCurrentStatus("busy");
+          ctx.ui.setStatus("morph", "morph:run Work phase...");
+          ctx.ui.notify("Work: executing task DAG...", "info");
           updateWidget(ctx as any);
 
           try {
@@ -1556,13 +1736,21 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
                 // Brief wave confirmation in guided mode
                 const waveTasks = wave
-                  .map((t) => `  ○ [${t.id}] ${t.description.slice(0, 50)} (${t.estimatedComplexity})`)
+                  .map((t) => `  [${t.id}] ${t.description.slice(0, 50)} (${t.estimatedComplexity})`)
                   .join("\n");
                 const totalWaves = waveGroups(state.planOutput!.tasks).length;
+                
+                const previousHint = currentHint;
+                currentStatus = "waiting";
+                currentHint = "wave approval  |  respond in Pi";
+                updateWidget(ctx as any);
                 const proceed = await ctx.ui.confirm(
-                  `🌊 Wave ${waveIndex + 1}/${totalWaves}`,
+                  `Wave ${waveIndex + 1}/${totalWaves}`,
                   `${wave.length} task(s):\n${waveTasks}\n\nExecute this wave?`
                 );
+                setCurrentStatus("busy");
+                currentHint = previousHint;
+                updateWidget(ctx as any);
                 return proceed;
               },
 
@@ -1573,9 +1761,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                 });
                 setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
                 const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
-                ctx.ui.setStatus("morph", `morph:run ⏳  Work: ${done}/${liveTasks.size} tasks`);
+                ctx.ui.setStatus("morph", `morph:run Work: ${done}/${liveTasks.size} tasks running...`);
 
-                const icon = result.status === "done" ? "✓" : result.status === "blocked" ? "⊘" : "✗";
+                const icon = result.status === "done" ? "[DONE]" : result.status === "blocked" ? "[BLOCKED]" : "[FAILED]";
                 ctx.ui.notify(`${icon} [${result.taskId}] ${result.summary.slice(0, 80)}`, 
                   result.status === "done" ? "info" : "warning");
                 clearSubagentActivity("engineer");
@@ -1593,13 +1781,14 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
             const done = results.filter((r) => r.status === "done").length;
             const failed = results.filter((r) => r.status === "failed").length;
-            ctx.ui.setStatus("morph", `morph:run ✓  Work: ${done}/${results.length} done`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run Work: ${done}/${results.length} done`);
             updateWidget(ctx as any);
-            ctx.ui.notify(`🔨 Work complete! ${done}/${results.length} tasks done.`, "success" as any);
+            ctx.ui.notify(`Work complete! ${done}/${results.length} tasks done.`, "success" as any);
 
             const progressText = formatProgress(results, state.planOutput!.tasks);
             const workSummary = [
-              `# 🔨 Work Complete`,
+              `# Work Complete`,
               ``,  
               `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}`,
               ``,  
@@ -1612,7 +1801,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
             const proceed = await waitConfirm(
               ctx,
-              "🔍 Proceed to Review phase?",
+              "Proceed to Review phase?",
               failed > 0
                 ? `${failed} task(s) failed. Review failures in chat and confirm to proceed.`
                 : `All ${done} tasks done. Confirm to start review.`,
@@ -1623,7 +1812,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
               return;
             }
           } catch (err: any) {
-            ctx.ui.setStatus("morph", `morph:run ✗  Work failed: ${err.message.slice(0, 40)}`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run Work failed: ${err.message.slice(0, 40)}`);
             ctx.ui.notify(`Work failed: ${err.message}`, "error");
             return;
           }
@@ -1631,8 +1821,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
         // ── Review ──
         if (state.phase === "review") {
-          ctx.ui.setStatus("morph", "morph:run ⏳  Review phase...");
-          ctx.ui.notify("🔍 Review: Tech Lead + QA + Perf + End User auditing...", "info");
+          setCurrentStatus("busy");
+          ctx.ui.setStatus("morph", "morph:run Review phase...");
+          ctx.ui.notify("Review: Tech Lead + QA + Perf + End User auditing...", "info");
           updateWidget(ctx as any);
 
           try {
@@ -1650,17 +1841,18 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             bb.setReviewOutput(reviewOutput);
             state = bb.getState();
 
-            const verdictIcon = reviewOutput.status === "APPROVED" ? "✅" : "❌";
-            ctx.ui.setStatus("morph", `morph:run ${verdictIcon}  Review: ${reviewOutput.status}`);
+            setCurrentStatus("ready");
+            const verdictIcon = reviewOutput.status === "APPROVED" ? "[APPROVED]" : "[REJECTED]";
+            ctx.ui.setStatus("morph", `morph:run Review: ${reviewOutput.status}`);
             updateWidget(ctx as any);
               ctx.ui.notify(
-                `🔍 Review: ${reviewOutput.status}`,
+                `Review: ${reviewOutput.status}`,
                 (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
               );
 
             if (reviewOutput.status !== "APPROVED") {
               const autorecover = await ctx.ui.confirm(
-                "❌ Review REJECTED",
+                "Review REJECTED",
                 `${reviewOutput.requiredChanges.length} changes required. Autorecover and attempt fixes?`
               );
               
@@ -1676,18 +1868,18 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                   bb.clearWorkResults();
                 }
                 
-                ctx.ui.notify("🔄 Autorecovering: transitioning back to WORK phase...", "info");
+                ctx.ui.notify("Autorecovering: transitioning back to WORK phase...", "info");
                 state = bb.getState(); // Refresh state after transition in setReviewOutput
                 continue;
               }
               
-              ctx.ui.notify("❌ Review rejected. Fix issues manually and run /morph:run again.", "warning");
+              ctx.ui.notify("Review rejected. Fix issues manually and run /morph:run again.", "warning");
               return;
             }
 
             // Gate: Review → Ship
             const reviewSummary = [
-              `# ${verdictIcon} Review — ${reviewOutput.status}`,
+              `# Review — ${reviewOutput.status}`,
               ``,  
               `**Score**: ${reviewOutput.efficiencyScore}/10`,
               ``,  
@@ -1704,7 +1896,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             ensureWebServer();
             const proceed = await waitConfirm(
               ctx,
-              "🚀 Proceed to Ship phase?",
+              "Proceed to Ship phase?",
               "Review approved! Review details in chat and confirm to release.",
               "review"
             );
@@ -1713,7 +1905,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
               return;
             }
           } catch (err: any) {
-            ctx.ui.setStatus("morph", `morph:run ✗  Review failed: ${err.message.slice(0, 40)}`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run Review failed: ${err.message.slice(0, 40)}`);
             ctx.ui.notify(`Review failed: ${err.message}`, "error");
             return;
           }
@@ -1721,8 +1914,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
         // ── Ship ──
         if (state.phase === "ship") {
-          ctx.ui.setStatus("morph", "morph:run ⏳  Ship phase...");
-          ctx.ui.notify("🚀 Ship: DevOps + Release Consultant preparing release...", "info");
+          setCurrentStatus("busy");
+          ctx.ui.setStatus("morph", "morph:run Ship phase...");
+          ctx.ui.notify("Ship: DevOps + Release Consultant preparing release...", "info");
           updateWidget(ctx as any);
 
           try {
@@ -1742,17 +1936,19 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             const report = writeFinalReportArtifacts(ctx);
             openFileInBrowser(report.htmlPath);
 
-            ctx.ui.setStatus("morph", `morph:run 🚀  v${shipOutput.version} shipped`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run v${shipOutput.version} shipped`);
             updateWidget(ctx as any);
             pi.sendMessage({
               customType: "morph",
-              content: `# 🚀 Final Handoff Report\n\nGenerated after ship:\n- Markdown: \`${report.markdownPath}\`\n- HTML: \`${report.htmlPath}\``,
+              content: `# Final Handoff Report\n\nGenerated after ship:\n- Markdown: \`${report.markdownPath}\`\n- HTML: \`${report.htmlPath}\``,
               display: true,
               details: { phase: "ship", markdownPath: report.markdownPath, htmlPath: report.htmlPath },
             });
-            ctx.ui.notify(`🚀 Shipped v${shipOutput.version}! Final report generated.`, "success" as any);
+            ctx.ui.notify(`Shipped v${shipOutput.version}! Final report generated.`, "success" as any);
           } catch (err: any) {
-            ctx.ui.setStatus("morph", `morph:run ✗  Ship failed: ${err.message.slice(0, 40)}`);
+            setCurrentStatus("ready");
+            ctx.ui.setStatus("morph", `morph:run Ship failed: ${err.message.slice(0, 40)}`);
             ctx.ui.notify(`Ship failed: ${err.message}`, "error");
             return;
           }
@@ -1760,8 +1956,12 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
 
       // ── Done ──
-      ctx.ui.notify("🎉 morph pipeline complete! /morph:status for details.", "success" as any);
-    },
+      ctx.ui.notify("morph pipeline complete! /morph:status for details.", "success" as any);
+  };
+
+  pi.registerCommand("morph:run", {
+    description: "Run the full pipeline with review gates: spark -> plan -> work -> review -> ship",
+    handler: runMorphPipeline,
   });
 
   // ═══════════════════════════════════════════
@@ -1798,7 +1998,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
       if (state.phase === "idle") {
         ctx.ui.notify("morph: idle — /morph:run <idea> to begin", "info");
-        ctx.ui.setWidget("morph", ["○  morph — Ready", "   /morph:run <idea> to begin"]);
+        ctx.ui.setWidget("morph", ["morph — Ready", "   /morph:run <idea> to begin"]);
         return;
       }
 
@@ -1809,7 +2009,37 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       // Send detailed summary as message
       const summary = bb.getContextualSummary(4000);
       pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "status" } });
-      ctx.ui.notify(`morph: phase=${state.phase}  •  ${formatTokens(state.tokenLedger?.total || 0)} tokens`, "info");
+      const checkpointCount = Object.keys(state.flowCheckpoints[state.phase] || {}).length;
+      ctx.ui.notify(
+        checkpointCount > 0
+          ? `morph: phase=${state.phase}  •  ${checkpointCount} checkpoint${checkpointCount === 1 ? "" : "s"} available  •  ${formatTokens(state.tokenLedger?.total || 0)} tokens`
+          : `morph: phase=${state.phase}  •  ${formatTokens(state.tokenLedger?.total || 0)} tokens`,
+        "info"
+      );
+    },
+  });
+
+  pi.registerCommand("morph:recover", {
+    description: "Resume the pipeline from the last safe checkpoint",
+    handler: async (_args, ctx) => {
+      const state = getBB().getState();
+      if (state.phase === "idle") {
+        ctx.ui.notify("Nothing to recover yet. Start with /morph:run <idea>.", "info");
+        return;
+      }
+      if (state.phase === "done") {
+        ctx.ui.notify("Pipeline already complete. Nothing to recover.", "info");
+        return;
+      }
+
+      const checkpointCount = Object.keys(state.flowCheckpoints[state.phase] || {}).length;
+      ctx.ui.notify(
+        checkpointCount > 0
+          ? `Recovering ${state.phase} from ${checkpointCount} checkpoint${checkpointCount === 1 ? "" : "s"}...`
+          : `No saved checkpoint in ${state.phase}; resuming from the start of the phase...`,
+        "info"
+      );
+      await runMorphPipeline("", ctx as any);
     },
   });
 
@@ -1853,19 +2083,19 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       const lines = [
         `# morph — Agent Teams (${SPARK_AGENTS.length + PLAN_AGENTS.length + WORK_AGENTS.length + REVIEW_AGENTS.length + SHIP_AGENTS.length} agents)`,
         "",
-        "## 💡 Spark (2)",
+        "## Spark (2)",
         ...SPARK_AGENTS.map((a) => `- **${a.role}** \`${a.name}\` — ${a.description}`),
         "",
-        "## 📋 Plan (3)",
+        "## Plan (3)",
         ...PLAN_AGENTS.map((a) => `- **${a.role}** \`${a.name}\` — ${a.description}`),
         "",
-        "## 🔨 Work (2 per task)",
+        "## Work (2 per task)",
         ...WORK_AGENTS.map((a) => `- **${a.role}** \`${a.name}\` — ${a.description}`),
         "",
-        "## 🔍 Review (4)",
+        "## Review (4)",
         ...REVIEW_AGENTS.map((a) => `- **${a.role}** \`${a.name}\` — ${a.description}`),
         "",
-        "## 🚀 Ship (2)",
+        "## Ship (2)",
         ...SHIP_AGENTS.map((a) => `- **${a.role}** \`${a.name}\` — ${a.description}`),
       ].join("\n");
 
@@ -1883,17 +2113,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       try {
         const bb = getBB();
         webServer = startMorphServer(bb, 4040);
-        ctx.ui.notify("🚀 Mission Control started at http://localhost:4040", "success" as any);
+        ctx.ui.notify("Mission Control started at http://localhost:4040", "success" as any);
       } catch (err: any) {
         ctx.ui.notify(`Failed to start server: ${err.message}`, "error" as any);
       }
     },
-  });
-
-  // ── Message Renderer: morph summary messages ──
-  pi.registerMessageRenderer("morph", (message, _options, theme) => {
-    // Just return the raw text — pi's built-in markdown rendering handles it
-    // But we could add custom headers/formatting here
-    return new Text((message.content as any) || "", 0, 0);
   });
 }

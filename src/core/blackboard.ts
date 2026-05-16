@@ -46,6 +46,7 @@ export function createInitialState(): MorphState {
     workResults: [],
     tokenLedger: { spark: 0, plan: 0, work: 0, review: 0, ship: 0, total: 0 },
     activeAgents: [],
+    flowCheckpoints: {},
     retries: {},
     decisions: [],
   };
@@ -166,9 +167,33 @@ export class Blackboard {
     this.save();
   }
 
+  setPipelinePrompt(prompt: string): void {
+    this.state.pipelinePrompt = prompt;
+    this.save();
+  }
+
+  getFlowCheckpoint(phase: string, key: string): string | undefined {
+    return this.state.flowCheckpoints[phase]?.[key];
+  }
+
+  setFlowCheckpoint(phase: string, key: string, value: string): void {
+    this.state.flowCheckpoints[phase] = {
+      ...(this.state.flowCheckpoints[phase] || {}),
+      [key]: value,
+    };
+    this.save();
+  }
+
+  clearFlowCheckpoints(phase?: string): void {
+    if (phase) delete this.state.flowCheckpoints[phase];
+    else this.state.flowCheckpoints = {};
+    this.save();
+  }
+
   /** Store spark output and move to plan phase. */
   setSparkOutput(output: MorphState["sparkOutput"]): void {
     this.state.sparkOutput = output;
+    delete this.state.flowCheckpoints.spark;
     this.state.phase = "plan";
     this.save();
   }
@@ -176,6 +201,7 @@ export class Blackboard {
   /** Store plan output and move to work phase. */
   setPlanOutput(output: MorphState["planOutput"]): void {
     this.state.planOutput = output;
+    delete this.state.flowCheckpoints.plan;
     this.state.phase = "work";
     this.save();
   }
@@ -215,6 +241,7 @@ export class Blackboard {
   /** Store review output. */
   setReviewOutput(output: MorphState["reviewOutput"]): void {
     this.state.reviewOutput = output;
+    delete this.state.flowCheckpoints.review;
     if (output?.status === "APPROVED") {
       this.state.phase = "ship";
     } else {
@@ -226,6 +253,7 @@ export class Blackboard {
   /** Store ship output. */
   setShipOutput(output: MorphState["shipOutput"]): void {
     this.state.shipOutput = output;
+    delete this.state.flowCheckpoints.ship;
     this.state.phase = "done";
     this.save();
   }
@@ -267,6 +295,7 @@ export class Blackboard {
   resetPhase(phase: MorphPhase): void {
     if (phase === "review") {
       this.state.reviewOutput = undefined;
+      delete this.state.flowCheckpoints.review;
       this.state.phase = "work";
     } else if (phase === "work") {
       // Keep completed tasks, just reset phase
@@ -274,6 +303,7 @@ export class Blackboard {
     } else if (phase === "plan") {
       this.state.planOutput = undefined;
       this.state.workResults = [];
+      delete this.state.flowCheckpoints.plan;
       this.state.phase = "spark";
     }
     this.save();
@@ -322,6 +352,18 @@ export class Blackboard {
     if (s.shipOutput) {
       lines.push("## Ship");
       lines.push(`Status: ${s.shipOutput.status} | Version: ${s.shipOutput.version}`);
+      lines.push("");
+    }
+
+    const checkpointEntries = Object.entries(s.flowCheckpoints);
+    if (checkpointEntries.length > 0) {
+      lines.push("## Recovery Checkpoints");
+      for (const [phase, checkpoints] of checkpointEntries) {
+        const keys = Object.keys(checkpoints);
+        if (keys.length > 0) {
+          lines.push(`- ${phase}: ${keys.join(", ")}`);
+        }
+      }
       lines.push("");
     }
 

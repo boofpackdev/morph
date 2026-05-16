@@ -73,19 +73,18 @@ Produce a structured PRD with these sections (mark exactly like this):
 
 Be exhaustive. Think through edge cases. This PRD will be stress-tested by a Critic, so make it robust.`;
 
-  const visionaryResult = await runAgent(visionary, {
+  const visionaryOutput = blackboard.getFlowCheckpoint("spark", "visionary") || (await runAgent(visionary, {
     cwd,
     task: `Refine this idea into a comprehensive PRD:\n\n${prompt}`,
     systemPrompt: visionarySystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(visionary.name, visionary.role, "-", event),
-  });
-
-  blackboard.addTokens(
-    "spark",
-    estimateTokens(visionaryResult.output || "")
-  );
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("spark", "visionary")) {
+    blackboard.addTokens("spark", estimateTokens(visionaryOutput));
+    blackboard.setFlowCheckpoint("spark", "visionary", visionaryOutput);
+  }
 
   // ── Step 2: Critic stress-tests the PRD ──
   const criticSystemPrompt = `You are the **Critic** for the morph orchestration pipeline.
@@ -119,16 +118,18 @@ Review the PRD below. Produce a structured critique with:
 
 Be sharp, specific, and constructive. Every criticism must come with a suggested fix.`;
 
-  const criticResult = await runAgent(critic, {
+  const criticOutput = blackboard.getFlowCheckpoint("spark", "critic") || (await runAgent(critic, {
     cwd,
-    task: `Critique this PRD thoroughly:\n\n${visionaryResult.output}`,
+    task: `Critique this PRD thoroughly:\n\n${visionaryOutput}`,
     systemPrompt: criticSystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(critic.name, critic.role, "-", event),
-  });
-
-  blackboard.addTokens("spark", estimateTokens(criticResult.output || ""));
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("spark", "critic")) {
+    blackboard.addTokens("spark", estimateTokens(criticOutput));
+    blackboard.setFlowCheckpoint("spark", "critic", criticOutput);
+  }
 
   // ── Step 3: Visionary synthesizes final PRD ──
   const synthesisSystemPrompt = `You are the **Visionary** (Lead) for the morph orchestration pipeline.
@@ -167,19 +168,21 @@ Produce the final PRD in this exact format (parseable):
 
 Be concise. This output flows directly to the Plan phase.`;
 
-  const synthesisResult = await runAgent(visionary, {
+  const synthesisOutput = blackboard.getFlowCheckpoint("spark", "synthesis") || (await runAgent(visionary, {
     cwd,
-    task: `My original PRD:\n${visionaryResult.output}\n\nCritic's feedback:\n${criticResult.output}\n\nSynthesize a FINAL, refined PRD.`,
+    task: `My original PRD:\n${visionaryOutput}\n\nCritic's feedback:\n${criticOutput}\n\nSynthesize a FINAL, refined PRD.`,
     systemPrompt: synthesisSystemPrompt,
     signal,
     blackboard,
     onEvent: (event) => onAgentEvent?.(visionary.name, visionary.role, "-", event),
-  });
-
-  blackboard.addTokens("spark", estimateTokens(synthesisResult.output || ""));
+  })).output || "";
+  if (!blackboard.getFlowCheckpoint("spark", "synthesis")) {
+    blackboard.addTokens("spark", estimateTokens(synthesisOutput));
+    blackboard.setFlowCheckpoint("spark", "synthesis", synthesisOutput);
+  }
 
   // ── Parse output into structured SparkOutput ──
-  const output = synthesisResult.output || "";
+  const output = synthesisOutput;
   const sparkOutput = parseSparkOutput(output, prompt);
 
   // Record decisions
