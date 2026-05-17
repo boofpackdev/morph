@@ -202,11 +202,7 @@ function commitScaffoldResults(task: TaskNode, cwd: string): void {
   if (!isScaffold) return;
 
   try {
-    const repoDir = execSync("git rev-parse --show-toplevel 2>nul || echo .", {
-      cwd,
-      encoding: "utf-8",
-      timeout: 5000,
-    }).trim();
+    const repoDir = findGitRoot(cwd) ?? cwd;
 
     // Add all new/untracked files (this is what the scaffold created)
     execSync(`git add -A`, { cwd: repoDir, timeout: 10000 });
@@ -290,12 +286,38 @@ const IGNORED_ACTIVITY_SUFFIXES = [
   ".tmp",
 ];
 
+const WINDOWS_DEVICE_NAMES = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  "com1",
+  "com2",
+  "com3",
+  "com4",
+  "com5",
+  "com6",
+  "com7",
+  "com8",
+  "com9",
+  "lpt1",
+  "lpt2",
+  "lpt3",
+  "lpt4",
+  "lpt5",
+  "lpt6",
+  "lpt7",
+  "lpt8",
+  "lpt9",
+]);
+
 function isIgnoredActivityPath(file: string): boolean {
   const normalized = file.replace(/\\/g, "/");
   const parts = normalized.split("/");
   return (
     parts.some((part) => IGNORED_ACTIVITY_SEGMENTS.has(part)) ||
-    IGNORED_ACTIVITY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
+    IGNORED_ACTIVITY_SUFFIXES.some((suffix) => normalized.endsWith(suffix)) ||
+    parts.some((part) => WINDOWS_DEVICE_NAMES.has(part.toLowerCase().replace(/\..*$/, "")))
   );
 }
 

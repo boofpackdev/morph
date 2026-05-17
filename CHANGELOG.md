@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.5 - Exorcise `nul`
+
+### Changed
+- Scaffold commit setup now uses native git-root detection instead of shell redirection tricks
+
+### Fixed
+- Windows reserved device names such as `nul`, `con`, and `prn` are ignored by live file-activity tracking
+- False-positive live file collisions against pseudo-paths like `nul` no longer appear
+
 ## 0.7.4 - Fewer collisions, less exhaust
 
 ### Added
