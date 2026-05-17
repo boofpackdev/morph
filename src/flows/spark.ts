@@ -17,6 +17,7 @@ import {
   type AgentConfig,
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
+import { listSkillProfileLabels, renderSkillProfiles } from "../core/skill-profiles.js";
 import type { SparkOutput } from "../schemas/contracts.js";
 
 export interface SparkFlowOptions {
@@ -34,6 +35,8 @@ export async function executeSparkFlow(
 
   const visionary = SPARK_AGENTS.find((a) => a.name === "visionary")!;
   const critic = SPARK_AGENTS.find((a) => a.name === "critic")!;
+  const sparkSkillProfiles = ["spec-driven-development"] as const;
+  const sparkSkillBlock = renderSkillProfiles([...sparkSkillProfiles]);
 
   // ── Step 1: Visionary generates initial PRD ──
   const visionarySystemPrompt = `You are the **Visionary** for the morph orchestration pipeline.
@@ -79,7 +82,9 @@ Produce a structured PRD with these sections (mark exactly like this):
 - [Criterion 1]
 - ...
 
-Be exhaustive. Think through edge cases. This PRD will be stress-tested by a Critic, so make it robust.`;
+Be exhaustive. Think through edge cases. This PRD will be stress-tested by a Critic, so make it robust.
+
+${sparkSkillBlock}`;
 
   const visionaryOutput = blackboard.getFlowCheckpoint("spark", "visionary") || (await runAgent(visionary, {
     cwd,
@@ -126,7 +131,9 @@ Review the PRD below. Produce a structured critique with:
 [Concrete improvements to the PRD]
 
 Be sharp, specific, and constructive. Every criticism must come with a suggested fix.
-Specifically verify that the PRODUCT SHAPE matches the user's explicit request rather than assumptions introduced by the pipeline environment.`;
+Specifically verify that the PRODUCT SHAPE matches the user's explicit request rather than assumptions introduced by the pipeline environment.
+
+${sparkSkillBlock}`;
 
   const criticOutput = blackboard.getFlowCheckpoint("spark", "critic") || (await runAgent(critic, {
     cwd,
@@ -182,7 +189,9 @@ Produce the final PRD in this exact format (parseable):
 - [Criterion 1]
 ...
 
-Be concise. This output flows directly to the Plan phase.`;
+Be concise. This output flows directly to the Plan phase.
+
+${sparkSkillBlock}`;
 
   const synthesisOutput = blackboard.getFlowCheckpoint("spark", "synthesis") || (await runAgent(visionary, {
     cwd,
@@ -239,6 +248,11 @@ Be concise. This output flows directly to the Plan phase.`;
     "spark",
     `Identified ${sparkOutput.risks.length} risks and ${sparkOutput.coreFeatures.length} core features`,
     "Critic validation complete"
+  );
+  blackboard.recordDecision(
+    "spark",
+    `Applied skill profiles: ${listSkillProfileLabels([...sparkSkillProfiles]).join(", ")}`,
+    "Phase-scoped product-definition doctrine"
   );
 
   blackboard.setSparkOutput(sparkOutput);

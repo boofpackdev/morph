@@ -73,6 +73,7 @@ export interface SubagentActivity {
   lastAction: string;
   turns: number;
   toolDetail: string;
+  lastEventAt?: number;
 }
 
 export interface FileActivity {
@@ -366,7 +367,8 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
       const tool = sub.currentTool
         ? `${sub.currentTool}${sub.toolDetail ? ` ${sub.toolDetail}` : ""}`
         : "thinking...";
-      const summary = `${sub.role}${taskTag}  ${tool}`;
+      const quietFor = formatQuietDuration(sub.lastEventAt);
+      const summary = `${sub.role}${taskTag}  ${tool}${quietFor ? `  ·  ${quietFor}` : ""}`;
       lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(summary, innerWidth), innerWidth)} │`));
       if (sub.lastAction) {
         lines.push(theme.fg("dim", `│ ${pad(truncateToWidth(`↳ ${sub.lastAction}`, innerWidth), innerWidth)} │`));
@@ -388,6 +390,15 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
 function formatDelta(delta: number): string {
   if (delta > 0) return `+${delta}`;
   return String(delta);
+}
+
+function formatQuietDuration(lastEventAt?: number): string {
+  if (!lastEventAt) return "";
+  const seconds = Math.max(0, Math.floor((Date.now() - lastEventAt) / 1000));
+  if (seconds < 15) return "active now";
+  if (seconds < 60) return `quiet ${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `quiet ${minutes}m`;
 }
 
 function buildOperatorHeader(display: PipelineDisplay, theme: Theme, innerWidth: number): string {
@@ -481,6 +492,5 @@ function statusIcon(status: string, theme: Theme): string {
 
 export function formatDisplayTokens(count: number): string {
   if (count < 1000) return String(count);
-  if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-  return `${Math.round(count / 1000)}k`;
+  return `${(count / 1000).toFixed(1)}k`;
 }

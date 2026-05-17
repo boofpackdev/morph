@@ -16,6 +16,7 @@ import {
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
 import { formatDAG, topologicalSort, waveGroups } from "../core/engine.js";
+import { listSkillProfileLabels, renderSkillProfiles } from "../core/skill-profiles.js";
 import { TaskNodeSchema, type PlanOutput, type PlanTelemetry, type TaskNode } from "../schemas/contracts.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -39,6 +40,8 @@ export async function executePlanFlow(
   const architect = PLAN_AGENTS.find((a) => a.name === "architect")!;
   const qaExpert = PLAN_AGENTS.find((a) => a.name === "qa-expert")!;
   const efficiencyMgr = PLAN_AGENTS.find((a) => a.name === "efficiency-mgr")!;
+  const planSkillProfiles = ["planning-and-task-breakdown"] as const;
+  const planSkillBlock = renderSkillProfiles([...planSkillProfiles]);
 
   // ── Build the PRD context ──
   const prdContext = buildPrdContext(sparkOutput);
@@ -92,7 +95,9 @@ Each task must have:
 The DAG must be complete: every component from the component tree must have
 corresponding tasks. Tasks must be ordered correctly (database before API, etc.).
 
-Be exhaustive. This plan drives the entire implementation phase.`;
+Be exhaustive. This plan drives the entire implementation phase.
+
+${planSkillBlock}`;
 
   const architectTask = `PRD:\n${prdContext}\n\nDesign the complete technical plan.`;
 
@@ -145,7 +150,9 @@ For each task, provide:
 - Missing edge cases
 
 ### ADDITIONAL TEST TASKS
-Any tasks that should be added to the DAG for testing infrastructure.`;
+Any tasks that should be added to the DAG for testing infrastructure.
+
+${planSkillBlock}`;
 
   const efficiencySystemPrompt = `You are the **Efficiency Manager** for the morph orchestration pipeline.
 
@@ -173,7 +180,9 @@ Produce:
 [Tasks that should be split into smaller units]
 
 ### COST ESTIMATE
-[Rough estimate of implementation effort and compute cost]`;
+[Rough estimate of implementation effort and compute cost]
+
+${planSkillBlock}`;
 
   const planText = architectOutput;
 
@@ -279,7 +288,9 @@ One of: hours | days | weeks
 Make sure the task DAG is complete and all dependencies are correct.
 Every component must have corresponding tasks. Every dependency must reference a real task ID.
 Tasks must form a valid DAG (no cycles).
-Use the SAME targetDir for related work on the same deliverable. If the requested feature/site/app is meant to live in a subdirectory, place every related task in that subdirectory consistently rather than mixing root and nested paths.`;
+Use the SAME targetDir for related work on the same deliverable. If the requested feature/site/app is meant to live in a subdirectory, place every related task in that subdirectory consistently rather than mixing root and nested paths.
+
+${planSkillBlock}`;
 
   const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaOutput}\n\nEfficiency feedback:\n${effOutput}\n\nSynthesize the FINAL plan.`;
 
@@ -509,6 +520,11 @@ ${JSON.stringify(planOutput.tasks, null, 2)}
     "plan",
     `Estimated effort: ${planOutput.estimatedEffort}`,
     "Based on task complexity analysis"
+  );
+  blackboard.recordDecision(
+    "plan",
+    `Applied skill profiles: ${listSkillProfileLabels([...planSkillProfiles]).join(", ")}`,
+    "Phase-scoped planning doctrine"
   );
 
   blackboard.setPlanOutput(planOutput);

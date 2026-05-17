@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.3 - Better doctrine, better instruments
+
+### Added
+- Phase-scoped skill profiles for Spark, Plan, and retry/recovery behavior
+- Recovery reports now include Morph's debugging doctrine so operators can see how a retry is being reasoned about
+- Live lane freshness hints in the Work board (`active now`, `quiet 37s`, `quiet 5m`)
+
+### Changed
+- Spark and Plan now record which skill profiles shaped their output for easier auditability
+- Token totals keep one decimal place above 1k so live growth is visible instead of rounding itself into invisibility
+
+### Fixed
+- Work progress no longer shows contradictory task counts between the left rail and the Work Control panel
+- Live Work rendering now uses one task truth source while tasks are in flight
+
 ## 0.7.2 — Harder to derail
 
 ### Added

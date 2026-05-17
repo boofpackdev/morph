@@ -22,6 +22,7 @@ import {
   estimatePhaseTokens,
 } from "../core/engine.js";
 import { estimateTokens } from "../core/tokenizer.js";
+import { renderSkillProfiles } from "../core/skill-profiles.js";
 import type {
   TaskNode,
   WorkTaskResult,
@@ -597,6 +598,10 @@ ${reviewOutput.userPerspectiveFeedback}`;
     const feedbackBlock = lastReviewFeedback
       ? `\n\n## Local Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes during the previous implement-review loop for this specific task:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
       : "";
+    const recoverySkillBlock =
+      attempt > 1
+        ? `\n\n${renderSkillProfiles(["debugging-and-error-recovery"])}`
+        : "";
 
     const targetDirNote = task.targetDir
       ? `\n\n## Target Directory\nAll file operations should be within \`${task.targetDir}\` relative to the project root.`
@@ -613,7 +618,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${globalReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}
+- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${globalReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}${recoverySkillBlock}
 
 ## Instructions
 1. Read relevant existing files first

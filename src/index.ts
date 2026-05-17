@@ -37,6 +37,7 @@ import {
 import { startMorphServer, serverEvents } from "./server/server.js";
 import type { Server } from "node:http";
 import type { PlanOutput, SparkOutput } from "./schemas/contracts.js";
+import { renderSkillProfiles } from "./core/skill-profiles.js";
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
@@ -889,6 +890,8 @@ export default function (pi: ExtensionAPI) {
       diagnosis.autoSafe
         ? "- Morph can safely attempt the recommended recovery automatically."
         : "- Morph should not pretend this is routine. Human judgment or upstream repair is recommended before continuing.",
+      "",
+      renderSkillProfiles(["debugging-and-error-recovery"]),
       ""
     );
 
@@ -1061,7 +1064,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   }
 
   // ── Build display state from blackboard ──
-  function buildPipelineDisplay(): PipelineDisplay {
+  function buildPipelineDisplay(taskOverride?: TaskDisplay[]): PipelineDisplay {
     const bb = getBB();
     const state = bb.getState();
     const tasks: TaskDisplay[] = [];
@@ -1102,16 +1105,18 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       (activity) => activity.status === "running" || activity.status === "idle"
     );
 
+    const visibleTasks = taskOverride ?? tasks;
+
     return {
       phase: state.phase,
       status: currentStatus,
-      tasks,
+      tasks: visibleTasks,
       agents,
       tokenLedger: state.tokenLedger,
       tick: currentTick,
       subagentActivities: liveSubs.length > 0 ? liveSubs : undefined,
       fileActivities: [...activeFileActivities.values(), ...recentFileActivities].slice(0, 6),
-      phaseContext: buildPhaseContext(state, tasks, liveSubs),
+      phaseContext: buildPhaseContext(state, visibleTasks, liveSubs),
       footerHint: currentHint,
       restoredCheckpointCount: Object.keys(state.flowCheckpoints[state.phase] || {}).length,
     };
@@ -1305,11 +1310,12 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   function updateSubagentEvent(agentName: string, role: string, taskId: string, event: any): void {
     let entry = subagentActivities.get(agentName);
     if (!entry) {
-      entry = { name: agentName, role, taskId, status: "running", currentTool: "", lastAction: "", turns: 0, toolDetail: "" };
+      entry = { name: agentName, role, taskId, status: "running", currentTool: "", lastAction: "", turns: 0, toolDetail: "", lastEventAt: Date.now() };
       subagentActivities.set(agentName, entry);
     }
     entry.taskId = taskId;
     entry.status = "running";
+    entry.lastEventAt = Date.now();
     switch (event.type) {
       case "message_start":
         entry.currentTool = "";
@@ -1703,7 +1709,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           onWaveStart: async (wave, waveIndex) => {
             // Update widget: mark wave tasks as "running"
             for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
-            setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
+            setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
             ctx.ui.notify(
               `Work wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
               "info"
@@ -1719,7 +1725,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             });
 
             // Refresh widget
-            setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
+            setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
 
             // Update status bar
             const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
@@ -2204,7 +2210,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                     liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
                   }
                 }
-                setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
+                setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
                 ctx.ui.notify(
                   `Work wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
                   "info"
@@ -2217,7 +2223,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                   ...liveTasks.get(result.taskId)!,
                   status: result.status === "done" ? "done" : result.status === "blocked" ? "blocked" : "failed",
                 });
-                setPipelineWidget(ctx as any, () => ({ ...buildPipelineDisplay(), tasks: [...liveTasks.values()] }));
+                setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
                 const done = [...liveTasks.values()].filter((t) => t.status === "done").length;
                 ctx.ui.setStatus("morph", `morph:run Work: ${done}/${liveTasks.size} tasks running...`);
 
