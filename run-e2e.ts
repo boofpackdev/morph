@@ -24,14 +24,15 @@ if (process.argv.includes("--mode") && process.argv.includes("json")) {
   } else if (task.includes("Synthesize a FINAL, refined PRD")) {
     outputText = `### VISION STATEMENT\nMock Vision\n### CORE FEATURES\n- Feat 1\n### TARGET USER PERSONA\nMock Persona\n### CONSTRAINTS\n- Const 1\n### TECHNICAL STACK RECOMMENDATION\nMock Stack\n### RISKS\n- Risk 1\n### SUCCESS CRITERIA\n- Criteria 1`;
   } else if (task.includes("Design the complete technical plan")) {
-    outputText = `### ARCHITECTURE DIAGRAM\ngraph TB\n  A --> B\n### DATA MODELS\n- Model A\n### COMPONENT TREE\n- Component A : respons\n### TASKS (DAG)\n\`\`\`json\n[\n  {\n    "id": "TASK-01",\n    "description": "Mock task",\n    "category": "other",\n    "acceptanceCriteria": "Works",\n    "estimatedComplexity": "low"\n  }\n]\n\`\`\`\n### QA STRATEGY\nMock QA\n### RISK MITIGATIONS\n- Mock risk mitigation\n### ESTIMATED EFFORT\n1 days`;
+    outputText = `### ARCHITECTURE DIAGRAM\ngraph TB\n  A --> B\n### DATA MODELS\n- Model A\n### COMPONENT TREE\n- Component A : respons\n### TASKS (DAG)\n\`\`\`json\n[\n  {\n    "id": "TASK-01",\n    "description": "Create README.md with a mock deliverable summary",\n    "category": "docs",\n    "acceptanceCriteria": "README.md exists and contains the mock deliverable summary",\n    "estimatedComplexity": "low",\n    "files": ["README.md"],\n    "targetDir": "."\n  }\n]\n\`\`\`\n### QA STRATEGY\nMock QA\n### RISK MITIGATIONS\n- Mock risk mitigation\n### ESTIMATED EFFORT\n1 days`;
   } else if (task.includes("Review for testability")) {
     outputText = "QA output";
   } else if (task.includes("Analyze for efficiency")) {
     outputText = "Efficiency output";
   } else if (task.includes("Synthesize the FINAL plan")) {
-      outputText = `### ARCHITECTURE DIAGRAM\ngraph TB\n  A --> B\n### DATA MODELS\n- Model A\n### COMPONENT TREE\n- Component A : respons\n### TASKS (DAG)\n\`\`\`json\n[\n  {\n    "id": "TASK-01",\n    "description": "Mock task",\n    "category": "other",\n    "acceptanceCriteria": "Works",\n    "estimatedComplexity": "low"\n  }\n]\n\`\`\`\n### QA STRATEGY\nMock QA\n### RISK MITIGATIONS\n- Mock risk mitigation\n### ESTIMATED EFFORT\n1 days`;
+      outputText = `### ARCHITECTURE DIAGRAM\ngraph TB\n  A --> B\n### DATA MODELS\n- Model A\n### COMPONENT TREE\n- Component A : respons\n### TASKS (DAG)\n\`\`\`json\n[\n  {\n    "id": "TASK-01",\n    "description": "Create README.md with a mock deliverable summary",\n    "category": "docs",\n    "acceptanceCriteria": "README.md exists and contains the mock deliverable summary",\n    "estimatedComplexity": "low",\n    "files": ["README.md"],\n    "targetDir": "."\n  }\n]\n\`\`\`\n### QA STRATEGY\nMock QA\n### RISK MITIGATIONS\n- Mock risk mitigation\n### ESTIMATED EFFORT\n1 days`;
   } else if (task.includes("Implement task")) {
+    fs.writeFileSync(path.join(process.cwd(), "README.md"), "# Mock deliverable\n");
     outputText = "Implemented task TASK-01";
   } else if (task.includes("Review the implementation")) {
     outputText = "APPROVED\nLooks good.";

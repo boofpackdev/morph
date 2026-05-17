@@ -233,7 +233,7 @@ function parseSparkOutput(text: string, originalPrompt: string): SparkOutput {
 
   const output = {
     visionStatement: vision || originalPrompt.slice(0, 500),
-    coreFeatures: extractList("CORE FEATURES").length > 0 ? extractList("CORE FEATURES") : extractList("FEATURES"),
+    coreFeatures: (extractList("CORE FEATURES").length > 0 ? extractList("CORE FEATURES") : extractList("FEATURES")).slice(0, 8),
     targetUserPersona: persona || "General User",
     constraints: extractList("CONSTRAINTS"),
     technicalStackRecommendation: stack || "Stack not specified",

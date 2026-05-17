@@ -76,11 +76,9 @@ export interface SubagentActivity {
 }
 
 export interface FileActivity {
-  agentName: string;
-  role: string;
+  taskId: string;
   path: string;
-  absolutePath?: string;
-  operation: "read" | "edit" | "write";
+  operation: "add" | "modify" | "delete";
   beforeLines?: number;
   afterLines?: number;
   delta?: number;
@@ -297,6 +295,13 @@ function buildFooterHint(display: PipelineDisplay): string {
   if (display.footerHint) return display.footerHint;
   if (display.status === "waiting") return "approval needed  |  respond in Pi";
   if (display.status === "busy") return "working...  |  /morph:status";
+  if (
+    display.phase === "work" &&
+    display.tasks.some((task) => task.status === "failed" || task.status === "blocked") &&
+    !display.tasks.some((task) => task.status === "running")
+  ) {
+    return "work halted  |  /morph:recover  |  /morph:status";
+  }
 
   switch (display.phase) {
     case "spark":
@@ -332,7 +337,7 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
     lines.push(theme.fg("dim", `│ ${pad("no file changes yet", innerWidth)} │`));
   } else {
     for (const activity of [...activeFiles, ...recentFiles].slice(0, 4)) {
-      const op = activity.operation.toUpperCase();
+      const op = activity.operation === "add" ? "A" : activity.operation === "delete" ? "D" : "M";
       const marker = activity.status === "active" ? ">" : "✓";
       const lineStats =
         activity.beforeLines !== undefined && activity.afterLines !== undefined
@@ -340,13 +345,13 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
           : activity.beforeLines !== undefined
             ? ` ${activity.beforeLines} lines`
             : "";
-      const row = `${marker} ${op} ${activity.path}${lineStats}`;
+      const row = `${marker} [${activity.taskId}] ${op} ${activity.path}${lineStats}`;
       const color =
         activity.status === "active"
           ? "accent"
-          : (activity.delta ?? 0) > 0
+          : activity.operation === "add" || (activity.delta ?? 0) > 0
             ? "success"
-            : (activity.delta ?? 0) < 0
+            : activity.operation === "delete" || (activity.delta ?? 0) < 0
               ? "error"
               : "muted";
       lines.push(theme.fg(color as any, `│ ${pad(truncateToWidth(row, innerWidth), innerWidth)} │`));
@@ -387,10 +392,10 @@ function formatDelta(delta: number): string {
 function buildOperatorHeader(display: PipelineDisplay, theme: Theme, innerWidth: number): string {
   const restored = display.restoredCheckpointCount ?? 0;
   if (restored <= 0) {
-    return theme.fg("accent", `│ ${pad("FILE ACTIVITY", innerWidth)} │`);
+    return theme.fg("accent", `│ ${pad("WORKTREE CHANGES", innerWidth)} │`);
   }
 
-  const label = "FILE ACTIVITY";
+  const label = "WORKTREE CHANGES";
   const badge = `RESTORED ${restored}`;
   const gap = Math.max(1, innerWidth - label.length - badge.length);
   return `│ ${theme.fg("accent", label)}${" ".repeat(gap)}${theme.fg("success", badge)} │`;

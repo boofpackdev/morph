@@ -1,5 +1,5 @@
-/**
- * morph — Blackboard Pattern
+﻿/**
+ * morph â€” Blackboard Pattern
  *
  * Centralized state management. Agents never hold state in their own memory.
  * They read from and write to .morph/state.json (the "Blackboard").
@@ -20,6 +20,7 @@ import { MorphStateSchema } from "../schemas/contracts.js";
 const STATE_DIR = ".morph";
 const STATE_FILE = "state.json";
 const HISTORY_DIR = "history";
+const RECOVERY_DIR = "recovery";
 
 export function getMorphDir(cwd: string): string {
   return path.join(cwd, STATE_DIR);
@@ -31,6 +32,10 @@ export function getStatePath(cwd: string): string {
 
 export function getHistoryDir(cwd: string): string {
   return path.join(getMorphDir(cwd), HISTORY_DIR);
+}
+
+export function getRecoveryDir(cwd: string): string {
+  return path.join(getMorphDir(cwd), RECOVERY_DIR);
 }
 
 function ensureDir(dir: string): void {
@@ -52,8 +57,14 @@ export function createInitialState(): MorphState {
   };
 }
 
+export interface ArchivedMorphState {
+  path: string;
+  modifiedAt: Date;
+  state: MorphState;
+}
+
 /**
- * Central Blackboard — load, mutate, and save morph state.
+ * Central Blackboard â€” load, mutate, and save morph state.
  */
 export class Blackboard {
   private cwd: string;
@@ -64,6 +75,7 @@ export class Blackboard {
     this.cwd = cwd;
     ensureDir(getMorphDir(cwd));
     ensureDir(getHistoryDir(cwd));
+    ensureDir(getRecoveryDir(cwd));
     this.state = this.load();
   }
 
@@ -109,10 +121,17 @@ export class Blackboard {
         const parsed = JSON.parse(raw);
         const result = MorphStateSchema.safeParse(parsed);
         if (result.success) return result.data;
-        // Malformed state — archive and start fresh
+        const repaired = repairPersistedState(parsed);
+        const repairedResult = MorphStateSchema.safeParse(repaired);
+        if (repairedResult.success) {
+          this.archiveState(parsed, "repaired");
+          fs.writeFileSync(statePath, JSON.stringify(repairedResult.data, null, 2) + "\n", "utf-8");
+          return repairedResult.data;
+        }
+        // Malformed state â€” archive and start fresh
         this.archiveState(parsed, "malformed");
       } catch {
-        // Corrupt file — start fresh
+        // Corrupt file â€” start fresh
       }
     }
     return createInitialState();
@@ -153,6 +172,50 @@ export class Blackboard {
   /** Get full current state (read-only snapshot). */
   getState(): Readonly<MorphState> {
     return this.state;
+  }
+
+  /** Persist a human-readable recovery report for inspection outside state.json. */
+  writeRecoveryReport(taskId: string, markdown: string): string {
+    const recoveryDir = getRecoveryDir(this.cwd);
+    ensureDir(recoveryDir);
+    const safeTaskId = taskId.replace(/[^a-z0-9._-]+/gi, "-");
+    const reportPath = path.join(recoveryDir, `${safeTaskId}-latest.md`);
+    fs.writeFileSync(reportPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf-8");
+    return reportPath;
+  }
+
+  /** Return recoverable archived snapshots, newest first. */
+  getRecoverableArchives(): ArchivedMorphState[] {
+    const historyDir = getHistoryDir(this.cwd);
+    if (!fs.existsSync(historyDir)) return [];
+
+    return fs.readdirSync(historyDir)
+      .filter((name) => name.endsWith(".json"))
+      .map((name) => path.join(historyDir, name))
+      .map((archivePath) => {
+        try {
+          const raw = fs.readFileSync(archivePath, "utf-8");
+          const parsed = JSON.parse(raw);
+          const repaired = repairPersistedState(parsed);
+          const result = MorphStateSchema.safeParse(repaired);
+          if (!result.success || !isMeaningfulState(result.data)) return null;
+          return {
+            path: archivePath,
+            modifiedAt: fs.statSync(archivePath).mtime,
+            state: result.data,
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry): entry is ArchivedMorphState => Boolean(entry))
+      .sort((a, b) => b.modifiedAt.getTime() - a.modifiedAt.getTime());
+  }
+
+  /** Restore a previously archived snapshot into active state. */
+  restoreArchivedState(archive: ArchivedMorphState): void {
+    this.state = archive.state;
+    this.save();
   }
 
   /** Transition to a new phase. Enforces valid flow. */
@@ -312,7 +375,7 @@ export class Blackboard {
   /** Get a summary of the state for agent context. */
   getContextualSummary(maxTokens: number = 2000): string {
     const s = this.state;
-    const lines: string[] = [`# Morph State — Phase: ${s.phase}`];
+    const lines: string[] = [`# Morph State â€” Phase: ${s.phase}`];
     lines.push("");
 
     if (s.sparkOutput) {
@@ -333,7 +396,8 @@ export class Blackboard {
       );
       const done = s.workResults.filter((r) => r.status === "done").length;
       const blocked = s.workResults.filter((r) => r.status === "blocked").length;
-      lines.push(`Progress: ${done} done, ${blocked} blocked`);
+      const failed = s.workResults.filter((r) => r.status === "failed").length;
+      lines.push(`Progress: ${done} done, ${failed} failed, ${blocked} blocked`);
       lines.push(`QA: ${s.planOutput.qaStrategy.slice(0, 200)}`);
       lines.push("");
     }
@@ -392,4 +456,39 @@ export class Blackboard {
     const done = s.workResults.filter((r) => r.status === "done").length;
     return `morph:${s.phase} | tasks:${done}/${tasks} | tokens:${s.tokenLedger.total}`;
   }
+}
+
+function repairPersistedState(data: unknown): unknown {
+  if (!data || typeof data !== "object") return data;
+  const repaired = structuredClone(data as Record<string, unknown>) as Record<string, any>;
+
+  // Older parser versions could accidentally persist many more than the
+  // contract's 8 core features by swallowing nested bullets/code blocks.
+  // Preserve the flow and clamp it back to the current contract instead of
+  // discarding the whole blackboard.
+  if (Array.isArray(repaired.sparkOutput?.coreFeatures) && repaired.sparkOutput.coreFeatures.length > 8) {
+    repaired.sparkOutput.coreFeatures = repaired.sparkOutput.coreFeatures
+      .filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
+      .slice(0, 8);
+  }
+
+  return repaired;
+}
+
+function isMeaningfulState(state: MorphState): boolean {
+  return (
+    state.phase !== "idle" &&
+    state.phase !== "done" &&
+    (
+      Boolean(state.pipelinePrompt?.trim()) ||
+      Boolean(state.sparkOutput) ||
+      Boolean(state.planOutput) ||
+      state.workResults.length > 0 ||
+      Boolean(state.reviewOutput) ||
+      Boolean(state.shipOutput) ||
+      state.tokenLedger.total > 0 ||
+      state.decisions.length > 0 ||
+      Object.values(state.flowCheckpoints).some((phase) => Object.keys(phase).length > 0)
+    )
+  );
 }

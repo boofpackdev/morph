@@ -247,7 +247,7 @@ Use the SAME targetDir for related work on the same deliverable. If the requeste
 
   const synthesisTask = `Original plan:\n${planText}\n\nQA feedback:\n${qaOutput}\n\nEfficiency feedback:\n${effOutput}\n\nSynthesize the FINAL plan.`;
 
-  const finalOutput = blackboard.getFlowCheckpoint("plan", "synthesis") || (await runAgent(architect, {
+  let finalOutput = blackboard.getFlowCheckpoint("plan", "synthesis") || (await runAgent(architect, {
     cwd,
     task: synthesisTask,
     systemPrompt: synthesisSystemPrompt,
@@ -261,7 +261,42 @@ Use the SAME targetDir for related work on the same deliverable. If the requeste
   }
 
   // ── Parse output into structured PlanOutput ──
-  const planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
+  let planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
+  let planIssues = assessPlanQuality(planOutput);
+
+  // If extraction degraded into a placeholder/fallback plan, repair once before
+  // letting an unusable DAG reach WORK.
+  if (planIssues.length > 0) {
+    const repairPrompt = `The previous final plan could not be accepted because:
+${planIssues.map((issue) => `- ${issue}`).join("\n")}
+
+Return a corrected FINAL plan now.
+
+Hard requirements:
+- Include a real Mermaid architecture diagram, not a placeholder.
+- Include a concrete JSON task array inside the TASKS (DAG) section.
+- Tasks must be implementation-sized and specific to the PRD.
+- Every task needs id, description, category, dependsOn, acceptanceCriteria, estimatedComplexity, files, and targetDir.
+- Do not use generic placeholders like "Implement the core feature" or "Feature works as specified".`;
+
+    finalOutput = (await runAgent(architect, {
+      cwd,
+      task: `${repairPrompt}\n\nPrevious unusable final plan:\n${finalOutput}\n\nOriginal PRD context:\n${prdContext}`,
+      systemPrompt: synthesisSystemPrompt,
+      signal,
+      blackboard,
+      onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
+    })).output || "";
+    blackboard.addTokens("plan", estimateTokens(finalOutput));
+    blackboard.setFlowCheckpoint("plan", "synthesis", finalOutput);
+
+    planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
+    planIssues = assessPlanQuality(planOutput);
+  }
+
+  if (planIssues.length > 0) {
+    throw new Error(`Plan synthesis produced an unusable fallback plan: ${planIssues.join("; ")}`);
+  }
 
   // Validate DAG
   try {
@@ -694,4 +729,42 @@ function createDefaultTask(): TaskNode {
     acceptanceCriteria: "Feature works as specified",
     estimatedComplexity: "medium",
   };
+}
+
+function assessPlanQuality(plan: PlanOutput): string[] {
+  const issues: string[] = [];
+  const isPlaceholderArchitecture =
+    plan.architectureDiagram.trim() === "graph TB\n  A[System] --> B[Components]";
+  const hasDefaultTask =
+    plan.tasks.length === 1 &&
+    plan.tasks[0].id === "IMPL-01" &&
+    plan.tasks[0].description === "Implement the core feature" &&
+    plan.tasks[0].acceptanceCriteria === "Feature works as specified";
+  const hasGenericAcceptance = plan.tasks.some((task) =>
+    !task.acceptanceCriteria.trim() ||
+    /^feature works as specified$/i.test(task.acceptanceCriteria.trim())
+  );
+  const genericDescriptionPatterns = [
+    /^implement the core feature$/i,
+    /^implement task \d+$/i,
+    /^build the app$/i,
+    /^create the feature$/i,
+  ];
+  const hasGenericDescription = plan.tasks.some((task) =>
+    genericDescriptionPatterns.some((pattern) => pattern.test(task.description.trim()))
+  );
+  const hasMissingFiles = plan.tasks.some((task) => !task.files || task.files.length === 0);
+  const singleBroadTask =
+    plan.tasks.length === 1 &&
+    plan.tasks[0].estimatedComplexity !== "low" &&
+    !["docs", "test", "config"].includes(plan.tasks[0].category);
+
+  if (isPlaceholderArchitecture) issues.push("architecture diagram is still the placeholder fallback");
+  if (hasDefaultTask) issues.push("task DAG degraded to the default placeholder task");
+  if (plan.tasks.length === 0) issues.push("task DAG is empty");
+  if (hasGenericAcceptance) issues.push("one or more tasks have generic or missing acceptance criteria");
+  if (hasGenericDescription) issues.push("one or more tasks use generic implementation descriptions");
+  if (hasMissingFiles) issues.push("one or more tasks are missing expected file targets");
+  if (singleBroadTask) issues.push("plan collapses a non-trivial deliverable into one broad task");
+  return issues;
 }

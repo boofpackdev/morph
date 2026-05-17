@@ -114,6 +114,28 @@ export const WorkTaskResultSchema = z.object({
   summary: z.string().describe("What was done and why"),
   testsPassed: z.boolean().optional(),
   notes: z.string().optional(),
+  attemptCount: z.number().int().min(1).optional(),
+  failureKind: z
+    .enum([
+      "NO_EFFECT",
+      "TOOL_FAILURE",
+      "REVIEW_REJECTED",
+      "REVIEW_FORMAT_INVALID",
+      "VERIFICATION_FAILED",
+      "TASK_UNDERSPECIFIED",
+      "DEPENDENCY_BLOCKED",
+      "STATE_INCONSISTENT",
+    ])
+    .optional(),
+  failureEvidence: z.array(z.string()).default([]),
+  verification: z
+    .object({
+      changedFilesDetected: z.boolean(),
+      expectedFilesSatisfied: z.boolean().optional(),
+      matchedExpectedFiles: z.array(z.string()).default([]),
+      notes: z.array(z.string()).default([]),
+    })
+    .optional(),
 });
 
 export type WorkTaskResult = z.infer<typeof WorkTaskResultSchema>;

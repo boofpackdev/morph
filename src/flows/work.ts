@@ -1,10 +1,10 @@
-/**
- * morph — Work Flow (Task DAG → Code)
+﻿/**
+ * morph â€” Work Flow (Task DAG â†’ Code)
  *
  * Team: Primary Engineer + Peer Reviewer (2 agents per task)
  *
  * Executes tasks from the DAG in topological order.
- * Each task: Engineer implements → Reviewer audits → merge or retry.
+ * Each task: Engineer implements â†’ Reviewer audits â†’ merge or retry.
  * Independent tasks run in parallel waves.
  *
  * Output: WorkTaskResult[] stored on the Blackboard
@@ -19,7 +19,6 @@ import {
 import {
   topologicalSort,
   getReadyTasks,
-  canRetry,
   estimatePhaseTokens,
 } from "../core/engine.js";
 import { estimateTokens } from "../core/tokenizer.js";
@@ -43,7 +42,18 @@ export interface WorkFlowOptions {
   onWaveStart?: (wave: TaskNode[], waveIndex: number) => Promise<boolean>;
   /** Called after each task completes */
   onTaskComplete?: (result: WorkTaskResult) => void;
+  /** Called while a task is running with worktree-derived file changes since task start */
+  onTaskActivity?: (taskId: string, activity: WorktreeFileActivity[]) => void;
   onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void;
+}
+
+export interface WorktreeFileActivity {
+  taskId: string;
+  path: string;
+  operation: "add" | "modify" | "delete";
+  beforeLines?: number;
+  afterLines?: number;
+  delta?: number;
 }
 
 export async function executeWorkFlow(
@@ -57,6 +67,7 @@ export async function executeWorkFlow(
     signal,
     onWaveStart,
     onTaskComplete,
+    onTaskActivity,
     onAgentEvent,
   } = options;
 
@@ -90,7 +101,7 @@ export async function executeWorkFlow(
         task.dependsOn.every((dep) => completedIds.has(dep))
     );
     if (ready.length === 0) {
-      // Stuck — check for circular deps or all blocked
+      // Stuck â€” check for circular deps or all blocked
       const remaining = sorted.filter((t) => !processedIds.has(t.id));
       const blocked = remaining.filter((t) => {
         const deps = t.dependsOn.filter((d) => !completedIds.has(d));
@@ -104,6 +115,8 @@ export async function executeWorkFlow(
             status: "blocked",
             summary: `Blocked by failed dependencies: ${task.dependsOn.filter(d => !completedIds.has(d)).join(", ")}`,
             filesChanged: [],
+            failureKind: "DEPENDENCY_BLOCKED",
+            failureEvidence: [`Unfinished dependencies: ${task.dependsOn.filter(d => !completedIds.has(d)).join(", ")}`],
           };
           allResults.push(result);
           blackboard.addWorkResult(result);
@@ -146,6 +159,7 @@ export async function executeWorkFlow(
             maxRetries,
             signal,
             onTaskComplete,
+            onTaskActivity,
             onAgentEvent
           )
         )
@@ -164,8 +178,13 @@ export async function executeWorkFlow(
     waveIndex++;
   }
 
-  // Mark phase as done
-  blackboard.finishWork();
+  // Advance only when every planned task actually completed. Failed/blocked
+  // work stays in WORK so review is not run against an incomplete build.
+  const finalResultMap = new Map(allResults.map((result) => [result.taskId, result]));
+  const allTasksDone = sorted.every((task) => finalResultMap.get(task.id)?.status === "done");
+  if (allTasksDone) {
+    blackboard.finishWork();
+  }
 
   return allResults;
 }
@@ -198,14 +217,14 @@ function commitScaffoldResults(task: TaskNode, cwd: string): void {
       timeout: 5000,
     }).trim();
     if (status) {
-      execSync(`git commit -m "morph: auto-commit ${task.id} — ${task.description.slice(0, 60)}" --no-verify`, {
+      execSync(`git commit -m "morph: auto-commit ${task.id} â€” ${task.description.slice(0, 60)}" --no-verify`, {
         cwd: repoDir,
         timeout: 10000,
         stdio: "pipe",
       });
     }
   } catch {
-    // Not a git repo or git unavailable — skip auto-commit silently
+    // Not a git repo or git unavailable â€” skip auto-commit silently
   }
 }
 
@@ -248,8 +267,15 @@ function diffChangedFiles(before: Set<string>, after: Set<string>): string[] {
   return [...after].filter((file) => !before.has(file)).sort();
 }
 
-function snapshotWorkingTree(repoRoot: string | null): Map<string, string> {
-  if (!repoRoot) return new Map();
+interface WorktreeFileSnapshot {
+  fingerprint: string;
+  lineCount?: number;
+}
+
+function snapshotWorkingTree(repoRoot: string | null, fallbackRoot?: string): Map<string, WorktreeFileSnapshot> {
+  if (!repoRoot) {
+    return fallbackRoot ? snapshotPlainDirectory(fallbackRoot) : new Map();
+  }
   try {
     const tracked = execSync("git ls-files", {
       cwd: repoRoot,
@@ -268,14 +294,17 @@ function snapshotWorkingTree(repoRoot: string | null): Map<string, string> {
       .split(/\r?\n/)
       .filter(Boolean);
     const files = [...new Set([...tracked, ...untracked])];
-    const snapshot = new Map<string, string>();
+    const snapshot = new Map<string, WorktreeFileSnapshot>();
     for (const file of files) {
       const absolute = path.join(repoRoot, file);
       try {
         const stat = fs.statSync(absolute);
-        snapshot.set(file, `${stat.mtimeMs}:${stat.size}`);
+        snapshot.set(file, {
+          fingerprint: `${stat.mtimeMs}:${stat.size}`,
+          lineCount: countLinesIfTextFile(absolute, stat.size),
+        });
       } catch {
-        snapshot.set(file, "missing");
+        snapshot.set(file, { fingerprint: "missing", lineCount: 0 });
       }
     }
     return snapshot;
@@ -284,10 +313,58 @@ function snapshotWorkingTree(repoRoot: string | null): Map<string, string> {
   }
 }
 
-function diffWorkingTree(before: Map<string, string>, after: Map<string, string>): string[] {
+function countLinesIfTextFile(filePath: string, size?: number): number | undefined {
+  try {
+    const statSize = size ?? fs.statSync(filePath).size;
+    if (statSize > 1_000_000) return undefined;
+    const content = fs.readFileSync(filePath, "utf-8");
+    if (!content) return 0;
+    return content.split(/\r?\n/).length;
+  } catch {
+    return undefined;
+  }
+}
+
+function snapshotPlainDirectory(root: string): Map<string, WorktreeFileSnapshot> {
+  const snapshot = new Map<string, WorktreeFileSnapshot>();
+  const ignoredDirs = new Set([".git", ".morph", "node_modules"]);
+
+  const visit = (dir: string) => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const absolute = path.join(dir, entry.name);
+      const relative = path.relative(root, absolute).replace(/\\/g, "/");
+      if (entry.isDirectory()) {
+        if (!ignoredDirs.has(entry.name)) visit(absolute);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      try {
+        const stat = fs.statSync(absolute);
+        snapshot.set(relative, {
+          fingerprint: `${stat.mtimeMs}:${stat.size}`,
+          lineCount: countLinesIfTextFile(absolute, stat.size),
+        });
+      } catch {
+        snapshot.set(relative, { fingerprint: "missing", lineCount: 0 });
+      }
+    }
+  };
+
+  visit(root);
+  return snapshot;
+}
+
+function diffWorkingTree(before: Map<string, WorktreeFileSnapshot>, after: Map<string, WorktreeFileSnapshot>): string[] {
   const changed = new Set<string>();
-  for (const [file, fingerprint] of after) {
-    if (before.get(file) !== fingerprint) changed.add(file);
+  for (const [file, snapshot] of after) {
+    if (before.get(file)?.fingerprint !== snapshot.fingerprint) changed.add(file);
   }
   for (const file of before.keys()) {
     if (!after.has(file)) changed.add(file);
@@ -295,8 +372,123 @@ function diffWorkingTree(before: Map<string, string>, after: Map<string, string>
   return [...changed].sort();
 }
 
+function buildWorktreeActivity(
+  taskId: string,
+  before: Map<string, WorktreeFileSnapshot>,
+  after: Map<string, WorktreeFileSnapshot>
+): WorktreeFileActivity[] {
+  const changed = diffWorkingTree(before, after);
+  return changed.map((file) => {
+    const previous = before.get(file);
+    const current = after.get(file);
+    const operation: WorktreeFileActivity["operation"] =
+      !previous && current
+        ? "add"
+        : previous && !current
+          ? "delete"
+          : "modify";
+    const beforeLines = previous?.lineCount ?? (operation === "add" ? 0 : undefined);
+    const afterLines = current?.lineCount ?? (operation === "delete" ? 0 : undefined);
+    return {
+      taskId,
+      path: file,
+      operation,
+      beforeLines,
+      afterLines,
+      delta:
+        beforeLines !== undefined && afterLines !== undefined
+          ? afterLines - beforeLines
+          : undefined,
+    };
+  });
+}
+
 function mergeChangedFiles(...lists: string[][]): string[] {
   return [...new Set(lists.flat())].sort();
+}
+
+function matchesExpectedFilePattern(file: string, pattern: string): boolean {
+  const normalizedFile = file.replace(/\\/g, "/");
+  const normalizedPattern = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (normalizedPattern.endsWith("/**")) {
+    const prefix = normalizedPattern.slice(0, -3).replace(/\/$/, "");
+    return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`);
+  }
+  return normalizedFile === normalizedPattern;
+}
+
+function findExpectedFileMatches(task: TaskNode, taskRoot: string, changedFiles: string[]): string[] {
+  const expected = task.files || [];
+  if (expected.length === 0) return [];
+
+  const matched = new Set<string>();
+  for (const pattern of expected) {
+    for (const changed of changedFiles) {
+      if (matchesExpectedFilePattern(changed, pattern)) matched.add(pattern);
+    }
+
+    const normalized = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (normalized.endsWith("/**")) {
+      const directory = path.join(taskRoot, normalized.slice(0, -3));
+      if (fs.existsSync(directory)) matched.add(pattern);
+      continue;
+    }
+
+    if (fs.existsSync(path.join(taskRoot, normalized))) {
+      matched.add(pattern);
+    }
+  }
+
+  return [...matched].sort();
+}
+
+function buildVerification(
+  task: TaskNode,
+  taskRoot: string,
+  changedFiles: string[]
+): NonNullable<WorkTaskResult["verification"]> {
+  const matchedExpectedFiles = findExpectedFileMatches(task, taskRoot, changedFiles);
+  const notes: string[] = [];
+  const changedFilesDetected = changedFiles.length > 0;
+  const expectedFilesSatisfied =
+    task.files && task.files.length > 0 ? matchedExpectedFiles.length > 0 : undefined;
+
+  if (!changedFilesDetected) notes.push("No repository file changes were detected during the task attempt.");
+  if (task.files?.length && !expectedFilesSatisfied) {
+    notes.push(`None of the expected file targets were found or changed: ${task.files.join(", ")}`);
+  }
+
+  return {
+    changedFilesDetected,
+    expectedFilesSatisfied,
+    matchedExpectedFiles,
+    notes,
+  };
+}
+
+function classifyVerificationFailure(
+  task: TaskNode,
+  verification: NonNullable<WorkTaskResult["verification"]>
+): { kind: NonNullable<WorkTaskResult["failureKind"]>; evidence: string[] } | null {
+  if (!verification.changedFilesDetected) {
+    return {
+      kind: "NO_EFFECT",
+      evidence: ["Task attempt completed without any detected file changes."],
+    };
+  }
+  if (task.files?.length && verification.expectedFilesSatisfied === false) {
+    return {
+      kind: "VERIFICATION_FAILED",
+      evidence: [`Expected file targets were not satisfied: ${task.files.join(", ")}`],
+    };
+  }
+  return null;
+}
+
+function parseReviewerVerdict(text: string): "APPROVED" | "CHANGES_REQUESTED" | undefined {
+  const match = /\b(APPROVED|CHANGES_REQUESTED)\b/i.exec(text);
+  if (!match) return undefined;
+  return match[1].toUpperCase() as "APPROVED" | "CHANGES_REQUESTED";
 }
 
 /**
@@ -341,14 +533,16 @@ async function executeSingleTask(
   maxRetries: number,
   signal?: AbortSignal,
   onTaskComplete?: (result: WorkTaskResult) => void,
+  onTaskActivity?: (taskId: string, activity: WorktreeFileActivity[]) => void,
   onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void
 ): Promise<WorkTaskResult> {
-  // ── Fix 2: Resolve project-scoped cwd ──
+  // â”€â”€ Fix 2: Resolve project-scoped cwd â”€â”€
   const cwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
   const repoRoot = findGitRoot(baseCwd);
 
   let attempt = 0;
   let lastReviewFeedback = "";
+  let lastFailureSummary = "";
   const humanReviewNotes = blackboard.getState().planOutput?.humanReviewNotes?.trim();
   const humanReviewBlock = humanReviewNotes
     ? `
@@ -358,10 +552,10 @@ Before implementation, the user reviewed/edited the work specification. Treat th
 ${humanReviewNotes}`
     : "";
 
-  // ── Fix 4: Build docs context block for documentation tasks ──
+  // â”€â”€ Fix 4: Build docs context block for documentation tasks â”€â”€
   const docsContextBlock = task.category === "docs" ? buildDocsContextBlock(blackboard) : "";
 
-  // ── Autorecovery: Inject global review feedback ──
+  // â”€â”€ Autorecovery: Inject global review feedback â”€â”€
   const reviewOutput = blackboard.getState().reviewOutput;
   let globalReviewBlock = "";
   if (reviewOutput && reviewOutput.status !== "APPROVED") {
@@ -386,12 +580,20 @@ ${reviewOutput.userPerspectiveFeedback}`;
   while (attempt < maxRetries) {
     attempt++;
     const filesBeforeAttempt = snapshotChangedFiles(repoRoot);
-    const treeBeforeAttempt = snapshotWorkingTree(repoRoot);
+    const treeBeforeAttempt = snapshotWorkingTree(repoRoot, baseCwd);
+    const reportTaskActivity = () => {
+      onTaskActivity?.(
+        task.id,
+        buildWorktreeActivity(task.id, treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+      );
+    };
+    reportTaskActivity();
+    const activityInterval = setInterval(reportTaskActivity, 750);
     if (attempt > 1) {
       blackboard.incrementRetry(task.id);
     }
 
-    // ── Engineer implements ──
+    // â”€â”€ Engineer implements â”€â”€
     const feedbackBlock = lastReviewFeedback
       ? `\n\n## Local Reviewer Feedback from Previous Attempt\nThe peer reviewer requested these changes during the previous implement-review loop for this specific task:\n${lastReviewFeedback}\n\nAddress ALL of the reviewer's feedback in this attempt.`
       : "";
@@ -440,21 +642,27 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
     );
 
     if (engResult.exitCode !== 0 || engResult.stopReason === "error") {
-      if (canRetry(task.id, blackboard, maxRetries)) continue;
+      clearInterval(activityInterval);
+      reportTaskActivity();
+      lastFailureSummary = engResult.errorMessage || engResult.output || "Implementation failed";
+      if (attempt < maxRetries) continue;
       const result: WorkTaskResult = {
         taskId: task.id,
         status: "failed",
-        summary: engResult.errorMessage || engResult.output || "Implementation failed",
+        summary: lastFailureSummary,
         filesChanged: mergeChangedFiles(
           diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
-          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
         ),
+        attemptCount: attempt,
+        failureKind: "TOOL_FAILURE",
+        failureEvidence: [lastFailureSummary],
       };
       onTaskComplete?.(result);
       return result;
     }
 
-    // ── Peer Reviewer audits ──
+    // â”€â”€ Peer Reviewer audits â”€â”€
     const revSystemPrompt = `You are the **Peer Reviewer** for the morph orchestration pipeline.
 
 ## Your Role
@@ -493,42 +701,124 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       estimateTokens(revResult.output || "")
     );
 
-    const reviewOutput = revResult.output || "";
-    const isApproved = /APPROVED/i.test(reviewOutput.split("\n")[0] || "");
+    let reviewOutput = revResult.output || "";
+    let reviewerVerdict = parseReviewerVerdict(reviewOutput);
+
+    // Reviewer models sometimes prepend "thinking" or omit the required
+    // verdict entirely. Repair the review format once before spending another
+    // engineer implementation attempt on what may only be malformed output.
+    if (!reviewerVerdict) {
+      const verdictRetryResult = await runAgent(reviewer, {
+        cwd,
+        task: `Your previous review for task ${task.id} omitted the required explicit verdict.\n\nReturn the review again, starting with exactly one of:\nAPPROVED\nCHANGES_REQUESTED\n\nThen provide the concise rationale.`,
+        systemPrompt: revSystemPrompt,
+        signal,
+        blackboard,
+        onEvent: (event) => onAgentEvent?.(reviewer.name, reviewer.role, task.id, event),
+      });
+      blackboard.addTokens("work", estimateTokens(verdictRetryResult.output || ""));
+      if (verdictRetryResult.output?.trim()) {
+        reviewOutput = verdictRetryResult.output;
+        reviewerVerdict = parseReviewerVerdict(reviewOutput);
+      }
+    }
+
+    const isApproved = reviewerVerdict === "APPROVED";
 
     if (isApproved) {
-      // ── Fix 3: Auto-commit scaffold results so git checkpoints don't eat them ──
+      clearInterval(activityInterval);
+      reportTaskActivity();
+      // â”€â”€ Fix 3: Auto-commit scaffold results so git checkpoints don't eat them â”€â”€
       commitScaffoldResults(task, baseCwd);
+
+      const changedFiles = mergeChangedFiles(
+        diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+        diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+      );
+      const verification = buildVerification(task, cwd, changedFiles);
+      const verificationFailure = classifyVerificationFailure(task, verification);
+      if (verificationFailure) {
+        lastFailureSummary = verification.notes.join(" ") || "Task failed completion verification.";
+        if (attempt < maxRetries) {
+          lastReviewFeedback = [
+            reviewOutput,
+            "",
+            "Completion verification failed:",
+            ...verification.notes.map((note) => `- ${note}`),
+          ].join("\n");
+          continue;
+        }
+        const result: WorkTaskResult = {
+          taskId: task.id,
+          status: "failed",
+          summary: lastFailureSummary,
+          filesChanged: changedFiles,
+          attemptCount: attempt,
+          failureKind: verificationFailure.kind,
+          failureEvidence: verificationFailure.evidence,
+          verification,
+        };
+        onTaskComplete?.(result);
+        return result;
+      }
 
       const result: WorkTaskResult = {
         taskId: task.id,
         status: "done",
         summary: engResult.output || "Task completed",
-        filesChanged: mergeChangedFiles(
-          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
-          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
-        ),
+        filesChanged: changedFiles,
         testsPassed: true,
+        attemptCount: attempt,
+        failureEvidence: [],
+        verification,
       };
       onTaskComplete?.(result);
       return result;
     }
 
-    // Changes requested — feed back to engineer if retries remain
-    if (canRetry(task.id, blackboard, maxRetries)) {
+    if (!reviewerVerdict) {
+      clearInterval(activityInterval);
+      reportTaskActivity();
+      const result: WorkTaskResult = {
+        taskId: task.id,
+        status: "failed",
+        summary: "Peer reviewer returned no valid verdict after a formatting retry.",
+        notes: reviewOutput.slice(0, 500),
+        filesChanged: mergeChangedFiles(
+          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+        ),
+        attemptCount: attempt,
+        failureKind: "REVIEW_FORMAT_INVALID",
+        failureEvidence: ["Peer reviewer omitted a valid APPROVED or CHANGES_REQUESTED verdict twice."],
+      };
+      onTaskComplete?.(result);
+      return result;
+    }
+
+    // Changes requested â€” feed back to engineer if retries remain
+    lastFailureSummary = `Review requested changes: ${reviewOutput.slice(0, 200)}`;
+    if (attempt < maxRetries) {
+      clearInterval(activityInterval);
+      reportTaskActivity();
       // Store reviewer feedback so the engineer sees it on the next attempt
       lastReviewFeedback = reviewOutput;
       continue;
     }
 
+    clearInterval(activityInterval);
+    reportTaskActivity();
     const result: WorkTaskResult = {
       taskId: task.id,
       status: "failed",
       summary: `Review rejected after ${maxRetries} attempts: ${reviewOutput.slice(0, 200)}`,
       filesChanged: mergeChangedFiles(
         diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
-        diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot))
+        diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
       ),
+      attemptCount: attempt,
+      failureKind: "REVIEW_REJECTED",
+      failureEvidence: [reviewOutput.slice(0, 500)],
     };
     onTaskComplete?.(result);
     return result;
@@ -538,9 +828,13 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
   const result: WorkTaskResult = {
     taskId: task.id,
     status: "failed",
-    summary: `Failed after ${maxRetries} retry attempts`,
+    summary: lastFailureSummary || `Failed after ${maxRetries} retry attempts`,
     filesChanged: [],
+    attemptCount: attempt || maxRetries,
+    failureKind: "STATE_INCONSISTENT",
+    failureEvidence: [lastFailureSummary || "Retry loop exhausted without producing a terminal task result."],
   };
   onTaskComplete?.(result);
   return result;
 }
+
