@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Blackboard, getMorphDir } from "./core/blackboard.js";
-import { formatDAG, formatProgress, waveGroups, estimatePhaseTokens } from "./core/engine.js";
+import { detectFileTargetOverlaps, formatDAG, formatProgress, waveGroups, estimatePhaseTokens } from "./core/engine.js";
 import { formatTokens } from "./core/tokenizer.js";
 import { executeSparkFlow } from "./flows/spark.js";
 import { executePlanFlow } from "./flows/plan.js";
@@ -29,6 +29,7 @@ import {
   type AgentActivity,
   type SubagentActivity,
   type FileActivity,
+  type FileCollision,
   type PhaseContext,
   buildPipelineProgressWidget,
   buildTaskTracker,
@@ -45,6 +46,7 @@ function escapeHtml(text: string): string {
 
 function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
   const waves = waveGroups(plan.tasks);
+  const fileOverlaps = detectFileTargetOverlaps(plan.tasks);
   const lines: string[] = [
     "# morph Pre-Work Specification Review",
     "",
@@ -94,7 +96,24 @@ function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
     for (const task of waves[i]) lines.push(`- [${task.id}] ${task.description}`, `  - Category: ${task.category}`, `  - Complexity: ${task.estimatedComplexity}`, `  - Depends on: ${task.dependsOn.length ? task.dependsOn.join(", ") : "none"}`, `  - Acceptance: ${task.acceptanceCriteria}`);
   }
 
-  lines.push("", "## QA Strategy", plan.qaStrategy, "", "## Risk Mitigations", ...(plan.riskMitigations.length ? plan.riskMitigations.map((r) => `- ${r}`) : ["- None specified"]), "", "## Human Adjustments / Approval Notes", plan.humanReviewNotes || "Approved as written.");
+  lines.push(
+    "",
+    "## File Target Overlaps",
+    ...(fileOverlaps.length
+      ? fileOverlaps.map((overlap) =>
+          `- [${overlap.severity.toUpperCase()}] ${overlap.file}: ${overlap.taskIds.join(", ")} (waves ${overlap.waveNumbers.join(", ")}) — ${overlap.suggestion}`
+        )
+      : ["- None detected"]),
+    "",
+    "## QA Strategy",
+    plan.qaStrategy,
+    "",
+    "## Risk Mitigations",
+    ...(plan.riskMitigations.length ? plan.riskMitigations.map((r) => `- ${r}`) : ["- None specified"]),
+    "",
+    "## Human Adjustments / Approval Notes",
+    plan.humanReviewNotes || "Approved as written."
+  );
   return lines.join("\n");
 }
 
@@ -104,6 +123,7 @@ function renderHtmlList(items: string[], fallback: string): string {
 }
 
 function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutput): string {
+  const fileOverlaps = detectFileTargetOverlaps(plan.tasks);
   const taskRows = plan.tasks.map((task) => `<tr><td><code>${escapeHtml(task.id)}</code></td><td>${escapeHtml(task.description)}</td><td>${escapeHtml(task.category)}</td><td>${escapeHtml(task.estimatedComplexity)}</td><td>${escapeHtml(task.dependsOn.join(", ") || "none")}</td><td>${escapeHtml(task.acceptanceCriteria)}</td></tr>`).join("\n");
   const waveCards = waveGroups(plan.tasks).map((wave, index) => `
     <section class="wave">
@@ -141,6 +161,13 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
         </div>
       </section>`
     : "";
+  const overlapPanel = fileOverlaps.length
+    ? `<section class="panel overlap">
+        <h2>File target overlaps</h2>
+        <p>These planned tasks name the same concrete file target. Same-wave overlaps are the ones most likely to turn into live collisions.</p>
+        <ul>${fileOverlaps.map((overlap) => `<li><strong>${escapeHtml(overlap.severity.toUpperCase())}</strong> <code>${escapeHtml(overlap.file)}</code> — ${escapeHtml(overlap.taskIds.join(", "))} (waves ${escapeHtml(overlap.waveNumbers.join(", "))}). ${escapeHtml(overlap.suggestion)}</li>`).join("")}</ul>
+      </section>`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -160,6 +187,7 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
     .hero-grid,.split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}
     .panel,.wave,.spec{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
     .identity{border-color:#c7d2fe;background:#f8faff}.identity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.identity span{display:block;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}.identity strong{display:block;margin-top:4px}
+    .overlap{border-color:#fdba74;background:#fff7ed}
     .wave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
     table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
     th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-size:.92rem}
@@ -189,6 +217,7 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
     </header>
     <div class="notice"><strong>Approval meaning:</strong> the implementation plan below is ready to hand to the Engineer and Peer Reviewer agents. Use the pi editor if you want to change the spec; approve here only when the plan is ready as shown.</div>
     ${productIntent}
+    ${overlapPanel}
     <section class="panel">
       <h2>Architecture</h2>
       <pre>${escapeHtml(plan.architectureDiagram)}</pre>
@@ -1107,6 +1136,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
     const visibleTasks = taskOverride ?? tasks;
 
+    const fileActivities = [...activeFileActivities.values(), ...recentFileActivities].slice(0, 6);
+    const fileCollisions = buildFileCollisions([...activeFileActivities.values()]);
+
     return {
       phase: state.phase,
       status: currentStatus,
@@ -1115,7 +1147,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       tokenLedger: state.tokenLedger,
       tick: currentTick,
       subagentActivities: liveSubs.length > 0 ? liveSubs : undefined,
-      fileActivities: [...activeFileActivities.values(), ...recentFileActivities].slice(0, 6),
+      fileActivities,
+      fileCollisions,
       phaseContext: buildPhaseContext(state, visibleTasks, liveSubs),
       footerHint: currentHint,
       restoredCheckpointCount: Object.keys(state.flowCheckpoints[state.phase] || {}).length,
@@ -1157,6 +1190,24 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       activeFileActivities.delete(key);
       pushRecentFileActivity({ ...activity, status: "done" });
     }
+  }
+
+  function buildFileCollisions(activities: FileActivity[]): FileCollision[] {
+    const taskIdsByPath = new Map<string, Set<string>>();
+    for (const activity of activities) {
+      if (activity.status !== "active") continue;
+      const taskIds = taskIdsByPath.get(activity.path) ?? new Set<string>();
+      taskIds.add(activity.taskId);
+      taskIdsByPath.set(activity.path, taskIds);
+    }
+
+    return [...taskIdsByPath.entries()]
+      .filter(([, taskIds]) => taskIds.size > 1)
+      .map(([path, taskIds]) => ({
+        path,
+        taskIds: [...taskIds].sort(),
+      }))
+      .sort((a, b) => a.path.localeCompare(b.path));
   }
 
   function buildPhaseContext(
@@ -1298,6 +1349,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       );
       if (telemetry.watchlist.length) {
         lines.push(`Watchlist    ${telemetry.watchlist[0]}`);
+      }
+      if (telemetry.fileOverlaps.length) {
+        const first = telemetry.fileOverlaps[0];
+        lines.push(`Overlap      ${first.severity.toUpperCase()} ${first.taskIds.join(" + ")} -> ${first.file}`);
       }
       lines.push(`Next         ${telemetry.nextStep}`);
     } else {

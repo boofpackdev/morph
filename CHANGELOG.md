@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.7.4 - Fewer collisions, less exhaust
+
+### Added
+- Plan-time concrete file-target overlap detection with high/medium severity based on execution wave
+- File-overlap warnings in Plan Intelligence and the browser approval report
+- Live Work-board collision warnings when concurrent tasks touch the same real source file
+
+### Changed
+- Worktree activity ignores generated/cache noise such as `.pytest_cache`, `__pycache__`, and Python bytecode artifacts
+
+### Fixed
+- Runtime cache churn no longer crowds meaningful source changes out of the Work board
+- Parallel tasks that converge on the same source file are now visible before and during implementation
+
 ## 0.7.3 - Better doctrine, better instruments
 
 ### Added

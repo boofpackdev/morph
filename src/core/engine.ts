@@ -105,6 +105,57 @@ export function waveGroups(tasks: TaskNode[]): TaskNode[][] {
   return waves;
 }
 
+export interface FileTargetOverlap {
+  file: string;
+  taskIds: string[];
+  waveNumbers: number[];
+  severity: "high" | "medium";
+  suggestion: string;
+}
+
+export function detectFileTargetOverlaps(tasks: TaskNode[]): FileTargetOverlap[] {
+  const waves = waveGroups(tasks);
+  const waveByTaskId = new Map<string, number>();
+  waves.forEach((wave, index) => wave.forEach((task) => waveByTaskId.set(task.id, index + 1)));
+
+  const taskIdsByFile = new Map<string, Set<string>>();
+  for (const task of tasks) {
+    for (const file of task.files ?? []) {
+      const normalized = normalizeExpectedFileTarget(task.targetDir, file);
+      if (!normalized || normalized.includes("*")) continue;
+      const taskIds = taskIdsByFile.get(normalized) ?? new Set<string>();
+      taskIds.add(task.id);
+      taskIdsByFile.set(normalized, taskIds);
+    }
+  }
+
+  return [...taskIdsByFile.entries()]
+    .filter(([, taskIds]) => taskIds.size > 1)
+    .map(([file, taskIds]) => {
+      const ids = [...taskIds].sort();
+      const waveNumbers = [...new Set(ids.map((id) => waveByTaskId.get(id)).filter((wave): wave is number => wave !== undefined))].sort((a, b) => a - b);
+      const sameWave = waveNumbers.length < ids.length;
+      const severity: FileTargetOverlap["severity"] = sameWave ? "high" : "medium";
+      return {
+        file,
+        taskIds: ids,
+        waveNumbers,
+        severity,
+        suggestion: sameWave
+          ? "Merge duplicate work or add dependencies so these tasks do not edit the file concurrently."
+          : "Confirm each task owns a distinct edit to this shared artifact.",
+      };
+    })
+    .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+function normalizeExpectedFileTarget(targetDir: string | undefined, file: string): string {
+  const normalizedFile = file.replace(/\\/g, "/").replace(/^\.\//, "");
+  const normalizedDir = targetDir?.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/$/, "");
+  if (!normalizedDir || normalizedDir === ".") return normalizedFile;
+  return `${normalizedDir}/${normalizedFile}`;
+}
+
 /**
  * Select tasks ready to execute (all dependencies done and not yet completed).
  */

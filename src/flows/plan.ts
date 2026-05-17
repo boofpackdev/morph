@@ -15,7 +15,7 @@ import {
   PLAN_AGENTS,
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
-import { formatDAG, topologicalSort, waveGroups } from "../core/engine.js";
+import { detectFileTargetOverlaps, formatDAG, topologicalSort, waveGroups } from "../core/engine.js";
 import { listSkillProfileLabels, renderSkillProfiles } from "../core/skill-profiles.js";
 import { TaskNodeSchema, type PlanOutput, type PlanTelemetry, type TaskNode } from "../schemas/contracts.js";
 import * as fs from "node:fs";
@@ -52,6 +52,7 @@ export async function executePlanFlow(
     efficiency: {},
     finalPlan: {},
     watchlist: [],
+    fileOverlaps: [],
     nextStep: "draft first plan",
   });
 
@@ -123,6 +124,7 @@ ${planSkillBlock}`;
     efficiency: {},
     finalPlan: {},
     watchlist: [],
+    fileOverlaps: [],
     nextStep: "specialist review",
   });
 
@@ -528,6 +530,7 @@ ${JSON.stringify(planOutput.tasks, null, 2)}
   );
 
   blackboard.setPlanOutput(planOutput);
+  const fileOverlaps = detectFileTargetOverlaps(planOutput.tasks);
   blackboard.setPlanTelemetry({
     ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
     stage: "ready",
@@ -538,6 +541,7 @@ ${JSON.stringify(planOutput.tasks, null, 2)}
     },
     recovery: undefined,
     watchlist: planOutput.riskMitigations.slice(0, 2),
+    fileOverlaps,
     nextStep: "approve work spec",
   });
 
@@ -1062,6 +1066,7 @@ function createEmptyPlanTelemetry(): PlanTelemetry {
     efficiency: {},
     finalPlan: {},
     watchlist: [],
+    fileOverlaps: [],
     nextStep: "draft first plan",
   };
 }

@@ -148,6 +148,17 @@ export const PlanTelemetrySchema = z.object({
       estimatedEffort: z.enum(["hours", "days", "weeks"]).optional(),
     })
     .default({}),
+  fileOverlaps: z
+    .array(
+      z.object({
+        file: z.string(),
+        taskIds: z.array(z.string()),
+        waveNumbers: z.array(z.number().int().positive()),
+        severity: z.enum(["high", "medium"]),
+        suggestion: z.string(),
+      })
+    )
+    .default([]),
   recovery: z
     .object({
       issue: z.string(),

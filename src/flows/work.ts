@@ -273,6 +273,32 @@ interface WorktreeFileSnapshot {
   lineCount?: number;
 }
 
+const IGNORED_ACTIVITY_SEGMENTS = new Set([
+  ".pytest_cache",
+  "__pycache__",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".coverage",
+  "node_modules",
+]);
+
+const IGNORED_ACTIVITY_SUFFIXES = [
+  ".pyc",
+  ".pyo",
+  ".log",
+  ".tmp",
+];
+
+function isIgnoredActivityPath(file: string): boolean {
+  const normalized = file.replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  return (
+    parts.some((part) => IGNORED_ACTIVITY_SEGMENTS.has(part)) ||
+    IGNORED_ACTIVITY_SUFFIXES.some((suffix) => normalized.endsWith(suffix))
+  );
+}
+
 function snapshotWorkingTree(repoRoot: string | null, fallbackRoot?: string): Map<string, WorktreeFileSnapshot> {
   if (!repoRoot) {
     return fallbackRoot ? snapshotPlainDirectory(fallbackRoot) : new Map();
@@ -294,7 +320,7 @@ function snapshotWorkingTree(repoRoot: string | null, fallbackRoot?: string): Ma
     })
       .split(/\r?\n/)
       .filter(Boolean);
-    const files = [...new Set([...tracked, ...untracked])];
+    const files = [...new Set([...tracked, ...untracked])].filter((file) => !isIgnoredActivityPath(file));
     const snapshot = new Map<string, WorktreeFileSnapshot>();
     for (const file of files) {
       const absolute = path.join(repoRoot, file);
@@ -328,7 +354,7 @@ function countLinesIfTextFile(filePath: string, size?: number): number | undefin
 
 function snapshotPlainDirectory(root: string): Map<string, WorktreeFileSnapshot> {
   const snapshot = new Map<string, WorktreeFileSnapshot>();
-  const ignoredDirs = new Set([".git", ".morph", "node_modules"]);
+  const ignoredDirs = new Set([".git", ".morph", ...IGNORED_ACTIVITY_SEGMENTS]);
 
   const visit = (dir: string) => {
     let entries: fs.Dirent[];
@@ -345,7 +371,7 @@ function snapshotPlainDirectory(root: string): Map<string, WorktreeFileSnapshot>
         if (!ignoredDirs.has(entry.name)) visit(absolute);
         continue;
       }
-      if (!entry.isFile()) continue;
+      if (!entry.isFile() || isIgnoredActivityPath(relative)) continue;
       try {
         const stat = fs.statSync(absolute);
         snapshot.set(relative, {
@@ -379,7 +405,7 @@ function buildWorktreeActivity(
   after: Map<string, WorktreeFileSnapshot>
 ): WorktreeFileActivity[] {
   const changed = diffWorkingTree(before, after);
-  return changed.map((file) => {
+  return changed.filter((file) => !isIgnoredActivityPath(file)).map((file) => {
     const previous = before.get(file);
     const current = after.get(file);
     const operation: WorktreeFileActivity["operation"] =

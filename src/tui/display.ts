@@ -86,6 +86,11 @@ export interface FileActivity {
   status: "active" | "done";
 }
 
+export interface FileCollision {
+  path: string;
+  taskIds: string[];
+}
+
 export interface PhaseContext {
   title: string;
   lines: string[];
@@ -110,6 +115,7 @@ export interface PipelineDisplay {
   tick: number;
   subagentActivities?: SubagentActivity[];
   fileActivities?: FileActivity[];
+  fileCollisions?: FileCollision[];
   phaseContext?: PhaseContext;
   footerHint?: string;
   restoredCheckpointCount?: number;
@@ -328,6 +334,7 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
   const fileActivities = display.fileActivities ?? [];
   const activeFiles = fileActivities.filter((activity) => activity.status === "active");
   const recentFiles = fileActivities.filter((activity) => activity.status === "done");
+  const fileCollisions = display.fileCollisions ?? [];
   const lines = [
     theme.fg("dim", `╭${border}╮`),
     buildOperatorHeader(display, theme, innerWidth),
@@ -376,9 +383,18 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
     }
   }
 
+  if (fileCollisions.length > 0) {
+    lines.push(theme.fg("dim", `â”œ${border}â”¤`));
+    lines.push(theme.fg("error", `â”‚ ${pad("FILE COLLISION", innerWidth)} â”‚`));
+    for (const collision of fileCollisions.slice(0, 2)) {
+      const row = `${collision.taskIds.join(" + ")} -> ${collision.path}`;
+      lines.push(theme.fg("error", `â”‚ ${pad(truncateToWidth(row, innerWidth), innerWidth)} â”‚`));
+    }
+  }
+
   lines.push(theme.fg("dim", `├${border}┤`));
   lines.push(theme.fg("accent", `│ ${pad(display.phaseContext.title, innerWidth)} │`));
-  const contextLineLimit = display.phaseContext.title === "PLAN INTELLIGENCE" ? 7 : 2;
+  const contextLineLimit = display.phaseContext.title === "PLAN INTELLIGENCE" ? 8 : 2;
   for (const line of display.phaseContext.lines.slice(0, contextLineLimit)) {
     lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(line, innerWidth), innerWidth)} │`));
   }
