@@ -376,7 +376,8 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
 
   lines.push(theme.fg("dim", `├${border}┤`));
   lines.push(theme.fg("accent", `│ ${pad(display.phaseContext.title, innerWidth)} │`));
-  for (const line of display.phaseContext.lines.slice(0, 2)) {
+  const contextLineLimit = display.phaseContext.title === "PLAN INTELLIGENCE" ? 7 : 2;
+  for (const line of display.phaseContext.lines.slice(0, contextLineLimit)) {
     lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(line, innerWidth), innerWidth)} │`));
   }
 

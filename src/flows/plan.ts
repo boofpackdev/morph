@@ -15,8 +15,8 @@ import {
   PLAN_AGENTS,
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
-import { formatDAG, topologicalSort } from "../core/engine.js";
-import { TaskNodeSchema, type PlanOutput, type TaskNode } from "../schemas/contracts.js";
+import { formatDAG, topologicalSort, waveGroups } from "../core/engine.js";
+import { TaskNodeSchema, type PlanOutput, type PlanTelemetry, type TaskNode } from "../schemas/contracts.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -42,6 +42,15 @@ export async function executePlanFlow(
 
   // ── Build the PRD context ──
   const prdContext = buildPrdContext(sparkOutput);
+  blackboard.setPlanTelemetry({
+    stage: "drafting",
+    architect: {},
+    qa: {},
+    efficiency: {},
+    finalPlan: {},
+    watchlist: [],
+    nextStep: "draft first plan",
+  });
 
   // ── Step 1: Architect generates initial architecture ──
   const architectSystemPrompt = `You are the **Lead Architect** for the morph orchestration pipeline.
@@ -99,6 +108,18 @@ Be exhaustive. This plan drives the entire implementation phase.`;
     blackboard.addTokens("plan", estimateTokens(architectOutput));
     blackboard.setFlowCheckpoint("plan", "architect", architectOutput);
   }
+  blackboard.setPlanTelemetry({
+    stage: "specialist-review",
+    architect: {
+      componentsMapped: parseComponents(extractLooseSection(architectOutput, "COMPONENT TREE")).length,
+      tasksDrafted: countTaskLikeRows(architectOutput),
+    },
+    qa: {},
+    efficiency: {},
+    finalPlan: {},
+    watchlist: [],
+    nextStep: "specialist review",
+  });
 
   // ── Step 2: QA Expert and Efficiency Manager run in parallel ──
 
@@ -181,6 +202,21 @@ Produce:
     blackboard.addTokens("plan", estimateTokens(effOutput));
     blackboard.setFlowCheckpoint("plan", "efficiency", effOutput);
   }
+  blackboard.setPlanTelemetry({
+    ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
+    stage: "synthesizing",
+    qa: {
+      issuesFound: countListItems(extractLooseSection(qaOutput, "TASK TESTABILITY REVIEW")),
+      notableGap: firstMeaningfulLine(extractLooseSection(qaOutput, "ADDITIONAL TEST TASKS")),
+    },
+    efficiency: {
+      observationsFound:
+        countListItems(extractLooseSection(effOutput, "REDUNDANT / OVER-ENGINEERED")) +
+        countListItems(extractLooseSection(effOutput, "COMPLEXITY FLAGS")),
+      notableChange: firstMeaningfulLine(extractLooseSection(effOutput, "PARALLELIZATION OPPORTUNITIES")),
+    },
+    nextStep: "synthesize final plan",
+  });
 
   // ── Step 3: Architect synthesizes final plan ──
   const synthesisSystemPrompt = `You are the **Lead Architect** for the morph orchestration pipeline.
@@ -261,12 +297,22 @@ Use the SAME targetDir for related work on the same deliverable. If the requeste
   }
 
   // ── Parse output into structured PlanOutput ──
-  let planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
+  const initialPlanSource = hasSubstantivePlanContent(finalOutput) ? finalOutput : architectOutput;
+  let planOutput = normalizePlanOutput(parsePlanOutput(initialPlanSource), cwd, sparkOutput);
   let planIssues = assessPlanQuality(planOutput);
 
   // If extraction degraded into a placeholder/fallback plan, repair once before
   // letting an unusable DAG reach WORK.
   if (planIssues.length > 0) {
+    blackboard.setPlanTelemetry({
+      ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
+      stage: "repairing",
+      recovery: {
+        issue: planIssues[0],
+        action: "repair final plan",
+      },
+      nextStep: "repair final plan",
+    });
     const repairPrompt = `The previous final plan could not be accepted because:
 ${planIssues.map((issue) => `- ${issue}`).join("\n")}
 
@@ -292,6 +338,74 @@ Hard requirements:
 
     planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
     planIssues = assessPlanQuality(planOutput);
+  }
+
+  const richPlanSource = hasRichPlanWithoutJsonTasks(finalOutput)
+    ? finalOutput
+    : hasRichPlanWithoutJsonTasks(architectOutput)
+      ? architectOutput
+      : undefined;
+
+  if (planIssues.length > 0 && richPlanSource) {
+    blackboard.setPlanTelemetry({
+      ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
+      stage: "repairing",
+      recovery: {
+        issue: "rich plan found but task DAG was not machine-readable",
+        action: "extract JSON task DAG",
+      },
+      nextStep: "extract machine-readable DAG",
+    });
+    const taskExtractionOutput = (await runAgent(architect, {
+      cwd,
+      task: `The architecture plan below is detailed, but its task DAG was not machine-readable.
+
+Return ONLY this section, with no prose before or after it:
+
+### TASKS (DAG)
+\`\`\`json
+[
+  {
+    "id": "TASK-01",
+    "description": "Concrete implementation task",
+    "category": "other",
+    "dependsOn": [],
+    "acceptanceCriteria": "Specific verifiable result",
+    "estimatedComplexity": "medium",
+    "files": ["path/to/file.ts"],
+    "targetDir": "."
+  }
+]
+\`\`\`
+
+Requirements:
+- Extract the real implementation tasks already described in the plan.
+- Do not return markdown tables.
+- Do not invent placeholder tasks.
+- Use valid JSON only inside the code fence.
+- Keep dependencies consistent and every referenced dependency valid.
+
+Existing detailed plan:
+${richPlanSource}`,
+      systemPrompt: synthesisSystemPrompt,
+      signal,
+      blackboard,
+      onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
+    })).output || "";
+
+    blackboard.addTokens("plan", estimateTokens(taskExtractionOutput));
+    const extractedTasks = tryExtractJsonTasks(taskExtractionOutput);
+    if (extractedTasks?.length) {
+      planOutput = normalizePlanOutput(
+        {
+          ...planOutput,
+          tasks: extractedTasks,
+        },
+        cwd,
+        sparkOutput
+      );
+      planIssues = assessPlanQuality(planOutput);
+    }
   }
 
   if (planIssues.length > 0) {
@@ -322,6 +436,18 @@ Hard requirements:
   );
 
   blackboard.setPlanOutput(planOutput);
+  blackboard.setPlanTelemetry({
+    ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
+    stage: "ready",
+    finalPlan: {
+      tasks: planOutput.tasks.length,
+      waves: waveGroups(planOutput.tasks).length,
+      estimatedEffort: planOutput.estimatedEffort,
+    },
+    recovery: undefined,
+    watchlist: planOutput.riskMitigations.slice(0, 2),
+    nextStep: "approve work spec",
+  });
 
   return planOutput;
 }
@@ -331,6 +457,12 @@ Hard requirements:
 function buildPrdContext(spark: NonNullable<ReturnType<Blackboard["getState"]>["sparkOutput"]>): string {
   return [
     `# Product Requirements Document`,
+    ``,
+    `## Product Shape`,
+    `- Deliverable Type: ${spark.productShape.deliverableType}`,
+    `- Runtime / Host: ${spark.productShape.runtime}`,
+    `- Distribution: ${spark.productShape.distribution}`,
+    `- Explicit User Intent: ${spark.productShape.explicitUserIntent}`,
     ``,
     `## Vision`,
     spark.visionStatement,
@@ -520,11 +652,15 @@ function parseTasks(text: string): TaskNode[] {
 function parsePlanOutput(text: string): PlanOutput {
   const extractSection = (marker: string): string => {
     const regex = new RegExp(
-      `###\\s*${marker}[\\s\\S]*?(?=###\\s|$)`,
+      `(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}[\\s\\S]*?(?=(?:###|##)\\s*(?:\\d+\\.\\s*)?|$)`,
       "i"
     );
     const match = text.match(regex);
-    return match ? match[0].replace(/^###\s*${marker}\s*/i, "").trim() : "";
+    return match
+      ? match[0]
+          .replace(new RegExp(`^(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}\\s*`, "i"), "")
+          .trim()
+      : "";
   };
 
   const extractList = (marker: string): string[] => {
@@ -767,4 +903,58 @@ function assessPlanQuality(plan: PlanOutput): string[] {
   if (hasMissingFiles) issues.push("one or more tasks are missing expected file targets");
   if (singleBroadTask) issues.push("plan collapses a non-trivial deliverable into one broad task");
   return issues;
+}
+
+function hasRichPlanWithoutJsonTasks(text: string): boolean {
+  const hasTaskTable = /\|\s*ID\s*\|\s*Description\s*\|/i.test(text);
+  const hasTaskHeading = /task breakdown/i.test(text);
+  const hasJsonTasks = tryExtractJsonTasks(text) !== null;
+  return (hasTaskTable || hasTaskHeading) && !hasJsonTasks;
+}
+
+function hasSubstantivePlanContent(text: string): boolean {
+  const normalized = text.replace(/\[thinking\]|\[toolCall\]/gi, "").trim();
+  return normalized.length > 120;
+}
+
+function createEmptyPlanTelemetry(): PlanTelemetry {
+  return {
+    stage: "drafting",
+    architect: {},
+    qa: {},
+    efficiency: {},
+    finalPlan: {},
+    watchlist: [],
+    nextStep: "draft first plan",
+  };
+}
+
+function extractLooseSection(text: string, marker: string): string {
+  const regex = new RegExp(
+    `(?:###|##)\\s*${marker}[\\s\\S]*?(?=(?:###|##)\\s|$)`,
+    "i"
+  );
+  const match = text.match(regex);
+  return match ? match[0].replace(new RegExp(`^(?:###|##)\\s*${marker}\\s*`, "i"), "").trim() : "";
+}
+
+function countListItems(text: string): number {
+  return text
+    .split("\n")
+    .filter((line) => /^\s*(?:[-*]|\d+[.)])\s+/.test(line.trim())).length;
+}
+
+function firstMeaningfulLine(text: string): string | undefined {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
+    .find((line) => line.length > 0 && !/^none\b/i.test(line));
+}
+
+function countTaskLikeRows(text: string): number {
+  const parsed = tryExtractJsonTasks(text);
+  if (parsed) return parsed.length;
+  return text
+    .split("\n")
+    .filter((line) => /^\|\s*\*{0,2}[A-Z]+-\d+\*{0,2}\s*\|/.test(line.trim())).length;
 }

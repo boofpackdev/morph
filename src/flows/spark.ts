@@ -41,9 +41,17 @@ export async function executeSparkFlow(
 ## Your Role
 You take a raw idea and produce a structured, actionable Product Requirements Document (PRD).
 Be creative but grounded. Think about the user, the market, the technical feasibility.
+Do not infer that the product is a pi extension merely because morph itself runs inside pi.
+Only classify the target product as a pi extension when the user's request explicitly requires that.
 
 ## Your Output
 Produce a structured PRD with these sections (mark exactly like this):
+
+### PRODUCT SHAPE
+- Deliverable Type: [web app | CLI | library | API service | pi extension | etc.]
+- Runtime / Host: [where this product runs]
+- Distribution: [how the product is delivered or launched]
+- Explicit User Intent: [one sentence describing only what the user actually asked to build]
 
 ### VISION STATEMENT
 [One paragraph describing what we're building and why]
@@ -97,6 +105,7 @@ You stress-test ideas and PRDs. You find:
 - Risks that were overlooked
 - Unrealistic assumptions
 - Ambiguous language that could confuse implementers
+- Product-shape drift where the PRD silently turns one kind of product into another
 
 ## Instructions
 Review the PRD below. Produce a structured critique with:
@@ -116,11 +125,12 @@ Review the PRD below. Produce a structured critique with:
 ### REFINEMENT SUGGESTIONS
 [Concrete improvements to the PRD]
 
-Be sharp, specific, and constructive. Every criticism must come with a suggested fix.`;
+Be sharp, specific, and constructive. Every criticism must come with a suggested fix.
+Specifically verify that the PRODUCT SHAPE matches the user's explicit request rather than assumptions introduced by the pipeline environment.`;
 
   const criticOutput = blackboard.getFlowCheckpoint("spark", "critic") || (await runAgent(critic, {
     cwd,
-    task: `Critique this PRD thoroughly:\n\n${visionaryOutput}`,
+    task: `Original user request:\n${prompt}\n\nCritique this PRD thoroughly:\n\n${visionaryOutput}`,
     systemPrompt: criticSystemPrompt,
     signal,
     blackboard,
@@ -139,6 +149,12 @@ You've seen the Critic's feedback on your PRD. Now synthesize a FINAL, refined P
 
 ## Instructions
 Produce the final PRD in this exact format (parseable):
+
+### PRODUCT SHAPE
+- Deliverable Type: [concrete product type]
+- Runtime / Host: [where it runs]
+- Distribution: [how it is delivered]
+- Explicit User Intent: [what the user explicitly asked to build]
 
 ### VISION STATEMENT
 [One paragraph]
@@ -182,8 +198,36 @@ Be concise. This output flows directly to the Plan phase.`;
   }
 
   // ── Parse output into structured SparkOutput ──
-  const output = synthesisOutput;
-  const sparkOutput = parseSparkOutput(output, prompt);
+  let output = synthesisOutput;
+  let sparkOutput = parseSparkOutput(output, prompt);
+  let sparkIssues = assessSparkQuality(sparkOutput);
+
+  if (sparkIssues.length > 0) {
+    output =
+      (
+        await runAgent(visionary, {
+          cwd,
+          task: `The previous final PRD could not be accepted because:\n${sparkIssues
+            .map((issue) => `- ${issue}`)
+            .join(
+              "\n"
+            )}\n\nRepair the PRD. Preserve the user's actual request. Return the full final PRD again, including PRODUCT SHAPE.\n\nOriginal user request:\n${prompt}\n\nPrevious PRD:\n${output}`,
+          systemPrompt: synthesisSystemPrompt,
+          signal,
+          blackboard,
+          onEvent: (event) =>
+            onAgentEvent?.(visionary.name, visionary.role, "-", event),
+        })
+      ).output || output;
+    blackboard.addTokens("spark", estimateTokens(output));
+    blackboard.setFlowCheckpoint("spark", "synthesis", output);
+    sparkOutput = parseSparkOutput(output, prompt);
+    sparkIssues = assessSparkQuality(sparkOutput);
+  }
+
+  if (sparkIssues.length > 0) {
+    throw new Error(`Spark synthesis produced an unusable product definition: ${sparkIssues.join("; ")}`);
+  }
 
   // Record decisions
   blackboard.recordDecision(
@@ -228,10 +272,12 @@ function parseSparkOutput(text: string, originalPrompt: string): SparkOutput {
   };
 
   const vision = extractSection("VISION STATEMENT") || extractSection("VISION");
+  const productShapeSection = extractSection("PRODUCT SHAPE");
   const persona = extractSection("TARGET USER PERSONA") || extractSection("USER PERSONA") || extractSection("PERSONA");
   const stack = extractSection("TECHNICAL STACK RECOMMENDATION") || extractSection("TECHNICAL STACK") || extractSection("TECH STACK") || extractSection("STACK");
 
   const output = {
+    productShape: parseProductShape(productShapeSection, originalPrompt),
     visionStatement: vision || originalPrompt.slice(0, 500),
     coreFeatures: (extractList("CORE FEATURES").length > 0 ? extractList("CORE FEATURES") : extractList("FEATURES")).slice(0, 8),
     targetUserPersona: persona || "General User",
@@ -246,4 +292,43 @@ function parseSparkOutput(text: string, originalPrompt: string): SparkOutput {
   }
   
   return output;
+}
+
+function parseProductShape(section: string, originalPrompt: string): SparkOutput["productShape"] {
+  const readField = (label: string): string => {
+    const normalizedLines = section
+      .split("\n")
+      .map((line) => line.replace(/\*\*/g, "").trim());
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = normalizedLines
+      .map((line) => line.match(new RegExp(`^[-*]?\\s*${escapedLabel}\\s*:\\s*(.+)$`, "i")))
+      .find(Boolean);
+    return match?.[1]?.trim() || "";
+  };
+
+  return {
+    deliverableType: readField("Deliverable Type") || "unspecified product",
+    runtime: readField("Runtime / Host") || "unspecified runtime",
+    distribution: readField("Distribution") || "unspecified distribution",
+    explicitUserIntent:
+      readField("Explicit User Intent") || originalPrompt.trim().slice(0, 300),
+  };
+}
+
+function assessSparkQuality(output: SparkOutput): string[] {
+  const issues: string[] = [];
+  const shape = output.productShape;
+  if (/^unspecified product$/i.test(shape.deliverableType)) {
+    issues.push("product shape is missing a concrete deliverable type");
+  }
+  if (/^unspecified runtime$/i.test(shape.runtime)) {
+    issues.push("product shape is missing a runtime / host");
+  }
+  if (/^unspecified distribution$/i.test(shape.distribution)) {
+    issues.push("product shape is missing a distribution path");
+  }
+  if (!shape.explicitUserIntent.trim()) {
+    issues.push("product shape is missing explicit user intent");
+  }
+  return issues;
 }

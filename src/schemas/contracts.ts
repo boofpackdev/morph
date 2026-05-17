@@ -38,6 +38,20 @@ export type TaskNode = z.infer<typeof TaskNodeSchema>;
 
 // ── Spark Output (Idea → Refined PRD) ──
 export const SparkOutputSchema = z.object({
+  productShape: z.object({
+    deliverableType: z
+      .string()
+      .describe("Concrete product type, e.g. web app, CLI, library, API service, pi extension"),
+    runtime: z
+      .string()
+      .describe("Primary runtime / host environment for the product"),
+    distribution: z
+      .string()
+      .describe("How the product is expected to be delivered or run"),
+    explicitUserIntent: z
+      .string()
+      .describe("One-sentence statement of what the user explicitly asked to build"),
+  }),
   visionStatement: z
     .string()
     .describe("One-paragraph vision of what we're building"),
@@ -104,6 +118,47 @@ export const PlanOutputSchema = z.object({
 });
 
 export type PlanOutput = z.infer<typeof PlanOutputSchema>;
+
+export const PlanTelemetrySchema = z.object({
+  stage: z
+    .enum(["drafting", "specialist-review", "synthesizing", "repairing", "ready"])
+    .default("drafting"),
+  architect: z
+    .object({
+      componentsMapped: z.number().int().nonnegative().optional(),
+      tasksDrafted: z.number().int().nonnegative().optional(),
+    })
+    .default({}),
+  qa: z
+    .object({
+      issuesFound: z.number().int().nonnegative().optional(),
+      notableGap: z.string().optional(),
+    })
+    .default({}),
+  efficiency: z
+    .object({
+      observationsFound: z.number().int().nonnegative().optional(),
+      notableChange: z.string().optional(),
+    })
+    .default({}),
+  finalPlan: z
+    .object({
+      tasks: z.number().int().nonnegative().optional(),
+      waves: z.number().int().nonnegative().optional(),
+      estimatedEffort: z.enum(["hours", "days", "weeks"]).optional(),
+    })
+    .default({}),
+  recovery: z
+    .object({
+      issue: z.string(),
+      action: z.string(),
+    })
+    .optional(),
+  watchlist: z.array(z.string()).default([]),
+  nextStep: z.string().default("draft first plan"),
+});
+
+export type PlanTelemetry = z.infer<typeof PlanTelemetrySchema>;
 
 // ── Work Task Result ──
 export const WorkTaskResultSchema = z.object({
@@ -211,6 +266,7 @@ export const MorphStateSchema = z.object({
   pipelinePrompt: z.string().optional(),
   sparkOutput: SparkOutputSchema.optional(),
   planOutput: PlanOutputSchema.optional(),
+  planTelemetry: PlanTelemetrySchema.optional(),
   workResults: z.array(WorkTaskResultSchema).default([]),
   reviewOutput: ReviewOutputSchema.optional(),
   shipOutput: ShipOutputSchema.optional(),

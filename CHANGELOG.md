@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.1 — Clearer intent, leaner review
+
+### Added
+- Structured Product Shape capture in Spark: deliverable type, runtime/host, distribution path, and explicit user intent
+- A prominent “what morph believes it is building” section in the browser approval report
+- Spark repair/quality checks that fail early when the product identity is too vague to trust
+- Structured Plan telemetry plus a live Plan Intelligence panel that shows target shape, planning signals, recovery state, and next step
+
+### Changed
+- Review now starts from deterministic implementation evidence before asking specialist agents for opinions
+- QA, performance, and end-user reviewers are invoked conditionally instead of by default
+- Plan receives the explicit Product Shape contract so downstream architecture stays anchored to the intended deliverable
+- Plan recovery now preserves rich human-readable plans and extracts a machine-readable DAG instead of discarding useful work
+
+### Fixed
+- Negative review verdicts can no longer arrive without actionable required changes; Morph asks for a repaired review instead
+- Product Shape parsing now accepts markdown-formatted labels such as `**Deliverable Type:**`
+- Older persisted states are backfilled with a safe Product Shape placeholder during recovery
+- Plan recovery can salvage a strong Architect draft when the final synthesis checkpoint is empty or tool-only output
+- Plan parsing now accepts numbered headings such as `## 1. Architecture Diagram`
+
 ## 0.7.0 — Reliable recovery, fewer needless approvals
 
 ### Added

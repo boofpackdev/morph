@@ -54,6 +54,12 @@ function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
 
   if (spark) {
     lines.push(
+      "## Product Shape Contract",
+      `- **Deliverable Type**: ${spark.productShape.deliverableType}`,
+      `- **Runtime / Host**: ${spark.productShape.runtime}`,
+      `- **Distribution**: ${spark.productShape.distribution}`,
+      `- **Explicit User Intent**: ${spark.productShape.explicitUserIntent}`,
+      "",
       "## Product Intent",
       spark.visionStatement,
       "",
@@ -104,7 +110,16 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
       <ol>${wave.map((task) => `<li><strong>${escapeHtml(task.id)}</strong> ${escapeHtml(task.description)}</li>`).join("")}</ol>
     </section>`).join("");
   const productIntent = spark
-    ? `<section class="hero-grid">
+    ? `<section class="panel identity">
+        <h2>What morph believes it is building</h2>
+        <div class="identity-grid">
+          <div><span>Deliverable type</span><strong>${escapeHtml(spark.productShape.deliverableType)}</strong></div>
+          <div><span>Runtime / host</span><strong>${escapeHtml(spark.productShape.runtime)}</strong></div>
+          <div><span>Distribution</span><strong>${escapeHtml(spark.productShape.distribution)}</strong></div>
+          <div><span>Explicit user intent</span><strong>${escapeHtml(spark.productShape.explicitUserIntent)}</strong></div>
+        </div>
+      </section>
+      <section class="hero-grid">
         <div class="panel">
           <h2>What we are building</h2>
           <p>${escapeHtml(spark.visionStatement)}</p>
@@ -143,6 +158,7 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
     .notice{background:var(--warn);border-left:4px solid var(--warn-line);padding:16px 18px;border-radius:14px;margin:18px 0 22px}
     .hero-grid,.split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}
     .panel,.wave,.spec{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+    .identity{border-color:#c7d2fe;background:#f8faff}.identity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.identity span{display:block;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}.identity strong{display:block;margin-top:4px}
     .wave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
     table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
     th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-size:.92rem}
@@ -153,7 +169,7 @@ function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutp
     button{border:0;border-radius:12px;padding:12px 16px;font:inherit;font-weight:700;cursor:pointer}
     .approve{background:var(--ok);color:white}.pause{background:#e2e8f0;color:#334155}
     #browser-status{color:var(--muted);font-size:.92rem}
-    @media(max-width:800px){header,.hero-grid,.split{display:block}.metrics{margin-top:16px}.panel{margin-top:16px}}
+    @media(max-width:800px){header,.hero-grid,.split{display:block}.identity-grid{display:block}.identity-grid>div+div{margin-top:12px}.metrics{margin-top:16px}.panel{margin-top:16px}}
   </style>
 </head>
 <body>
@@ -1182,13 +1198,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           state.sparkOutput?.technicalStackRecommendation ? `stack -> ${state.sparkOutput.technicalStackRecommendation}` : "next -> synthesize final PRD",
         ]};
       case "plan":
-        return { title: "PLAN BOARD", lines: [
-          `Architect ${agentMark("architect")}`,
-          `QA ${agentMark("qa-expert")}  +  Efficiency ${agentMark("efficiency-mgr")}`,
-          checkpointKeys.size > 0 ? `restored ${[...checkpointKeys].join(", ")}` : "restored —",
-          state.planOutput ? `${state.planOutput.tasks.length} tasks  ·  ${waveGroups(state.planOutput.tasks).length} waves` : "building architecture + DAG",
-          state.planOutput ? `next -> work spec (${state.planOutput.estimatedEffort})` : "next -> specialist review",
-        ]};
+        return buildPlanIntelligenceContext(state);
       case "work": {
         const shownRunning = runningTasks.slice(0, 3).map(compactTask).join("   ");
         const shownPending = pendingTasks.slice(0, 3).map(compactTask).join("   ");
@@ -1237,6 +1247,59 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       default:
         return undefined;
     }
+  }
+
+  function buildPlanIntelligenceContext(
+    state: ReturnType<Blackboard["getState"]>
+  ): PhaseContext {
+    const telemetry = state.planTelemetry;
+    const shape = state.sparkOutput?.productShape;
+    const target = shape
+      ? `${shape.deliverableType} · ${shape.runtime} · ${shape.distribution}`
+      : "product shape not captured";
+    const lines = [`Target       ${target}`];
+
+    if (telemetry?.architect.tasksDrafted || telemetry?.architect.componentsMapped) {
+      const parts = [
+        telemetry.architect.tasksDrafted !== undefined
+          ? `${telemetry.architect.tasksDrafted} tasks drafted`
+          : undefined,
+        telemetry.architect.componentsMapped !== undefined
+          ? `${telemetry.architect.componentsMapped} components mapped`
+          : undefined,
+      ].filter(Boolean);
+      lines.push(`Architect    ${parts.join(" · ")}`);
+    } else {
+      lines.push("Architect    drafting architecture");
+    }
+
+    lines.push(
+      telemetry?.qa.issuesFound !== undefined
+        ? `QA           ${telemetry.qa.issuesFound} review signals${telemetry.qa.notableGap ? ` · ${telemetry.qa.notableGap}` : ""}`
+        : "QA           waiting for task graph"
+    );
+    lines.push(
+      telemetry?.efficiency.observationsFound !== undefined
+        ? `Efficiency   ${telemetry.efficiency.observationsFound} optimization signals${telemetry.efficiency.notableChange ? ` · ${telemetry.efficiency.notableChange}` : ""}`
+        : "Efficiency   waiting for task graph"
+    );
+
+    if (telemetry?.recovery) {
+      lines.push(`Recovery     ${telemetry.recovery.issue}`);
+      lines.push(`Next         ${telemetry.recovery.action}`);
+    } else if (telemetry?.finalPlan.tasks !== undefined) {
+      lines.push(
+        `Final plan   ${telemetry.finalPlan.tasks} tasks · ${telemetry.finalPlan.waves ?? "?"} waves · ${telemetry.finalPlan.estimatedEffort ?? "effort ?"}`
+      );
+      if (telemetry.watchlist.length) {
+        lines.push(`Watchlist    ${telemetry.watchlist[0]}`);
+      }
+      lines.push(`Next         ${telemetry.nextStep}`);
+    } else {
+      lines.push(`Next         ${telemetry?.nextStep ?? "draft first plan"}`);
+    }
+
+    return { title: "PLAN INTELLIGENCE", lines };
   }
 
   function updateSubagentEvent(agentName: string, role: string, taskId: string, event: any): void {

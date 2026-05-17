@@ -18,11 +18,11 @@ if (process.argv.includes("--mode") && process.argv.includes("json")) {
   let outputText = "Mocked output";
   
   if (task.includes("Refine this idea into a comprehensive PRD")) {
-    outputText = `### VISION STATEMENT\nMock Vision\n### CORE FEATURES\n- Feat 1\n### TARGET USER PERSONA\nMock Persona\n### CONSTRAINTS\n- Const 1\n### TECHNICAL STACK RECOMMENDATION\nMock Stack\n### RISKS\n- Risk 1\n### SUCCESS CRITERIA\n- Criteria 1`;
+    outputText = `### PRODUCT SHAPE\n- Deliverable Type: web app\n- Runtime / Host: browser\n- Distribution: local dev server\n- Explicit User Intent: Build a to-do app\n### VISION STATEMENT\nMock Vision\n### CORE FEATURES\n- Feat 1\n### TARGET USER PERSONA\nMock Persona\n### CONSTRAINTS\n- Const 1\n### TECHNICAL STACK RECOMMENDATION\nMock Stack\n### RISKS\n- Risk 1\n### SUCCESS CRITERIA\n- Criteria 1`;
   } else if (task.includes("Critique this PRD")) {
     outputText = "### STRENGTHS\n- Good\n### WEAKNESSES / GAPS\n- None\n### MISSING EDGE CASES\n- None\n### RISK REASSESSMENT\n- None\n### REFINEMENT SUGGESTIONS\n- None";
   } else if (task.includes("Synthesize a FINAL, refined PRD")) {
-    outputText = `### VISION STATEMENT\nMock Vision\n### CORE FEATURES\n- Feat 1\n### TARGET USER PERSONA\nMock Persona\n### CONSTRAINTS\n- Const 1\n### TECHNICAL STACK RECOMMENDATION\nMock Stack\n### RISKS\n- Risk 1\n### SUCCESS CRITERIA\n- Criteria 1`;
+    outputText = `### PRODUCT SHAPE\n- Deliverable Type: web app\n- Runtime / Host: browser\n- Distribution: local dev server\n- Explicit User Intent: Build a to-do app\n### VISION STATEMENT\nMock Vision\n### CORE FEATURES\n- Feat 1\n### TARGET USER PERSONA\nMock Persona\n### CONSTRAINTS\n- Const 1\n### TECHNICAL STACK RECOMMENDATION\nMock Stack\n### RISKS\n- Risk 1\n### SUCCESS CRITERIA\n- Criteria 1`;
   } else if (task.includes("Design the complete technical plan")) {
     outputText = `### ARCHITECTURE DIAGRAM\ngraph TB\n  A --> B\n### DATA MODELS\n- Model A\n### COMPONENT TREE\n- Component A : respons\n### TASKS (DAG)\n\`\`\`json\n[\n  {\n    "id": "TASK-01",\n    "description": "Create README.md with a mock deliverable summary",\n    "category": "docs",\n    "acceptanceCriteria": "README.md exists and contains the mock deliverable summary",\n    "estimatedComplexity": "low",\n    "files": ["README.md"],\n    "targetDir": "."\n  }\n]\n\`\`\`\n### QA STRATEGY\nMock QA\n### RISK MITIGATIONS\n- Mock risk mitigation\n### ESTIMATED EFFORT\n1 days`;
   } else if (task.includes("Review for testability")) {

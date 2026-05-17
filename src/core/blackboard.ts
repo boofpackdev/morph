@@ -256,6 +256,7 @@ export class Blackboard {
   /** Store spark output and move to plan phase. */
   setSparkOutput(output: MorphState["sparkOutput"]): void {
     this.state.sparkOutput = output;
+    delete this.state.planTelemetry;
     delete this.state.flowCheckpoints.spark;
     this.state.phase = "plan";
     this.save();
@@ -266,6 +267,11 @@ export class Blackboard {
     this.state.planOutput = output;
     delete this.state.flowCheckpoints.plan;
     this.state.phase = "work";
+    this.save();
+  }
+
+  setPlanTelemetry(output: MorphState["planTelemetry"]): void {
+    this.state.planTelemetry = output;
     this.save();
   }
 
@@ -470,6 +476,18 @@ function repairPersistedState(data: unknown): unknown {
     repaired.sparkOutput.coreFeatures = repaired.sparkOutput.coreFeatures
       .filter((item: unknown): item is string => typeof item === "string" && item.trim().length > 0)
       .slice(0, 8);
+  }
+
+  if (repaired.sparkOutput && !repaired.sparkOutput.productShape) {
+    repaired.sparkOutput.productShape = {
+      deliverableType: "unspecified product",
+      runtime: "unspecified runtime",
+      distribution: "unspecified distribution",
+      explicitUserIntent:
+        typeof repaired.pipelinePrompt === "string" && repaired.pipelinePrompt.trim()
+          ? repaired.pipelinePrompt.trim().slice(0, 300)
+          : "Intent not captured in older state",
+    };
   }
 
   return repaired;
