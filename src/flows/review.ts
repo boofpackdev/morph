@@ -248,11 +248,15 @@ For each change needed, use this exact one-line format:
   );
 
   if (needsReviewRepair(reviewOutput)) {
+    const repairReason =
+      reviewOutput.status !== "APPROVED" && reviewOutput.requiredChanges.length === 0
+        ? `Your prior verdict was ${reviewOutput.status}, but REQUIRED CHANGES was empty.`
+        : `Your prior verdict was APPROVED, but REQUIRED CHANGES still contained major or critical items.`;
     techLeadOutput =
       (
         await runAgent(techLead, {
           cwd,
-          task: `${techLeadTask}\n\nYour prior verdict was ${reviewOutput.status}, but REQUIRED CHANGES was empty. Repair the review. If the verdict is negative, include at least one concrete REQUIRED CHANGES bullet in the exact requested format. If there are no required changes, return APPROVED instead.`,
+          task: `${techLeadTask}\n\n${repairReason} Repair the review. If the verdict is negative, include at least one concrete REQUIRED CHANGES bullet in the exact requested format. If there are no required changes, return APPROVED instead. If major or critical changes remain, the verdict must not be APPROVED.`,
           systemPrompt: techLeadSystemPrompt,
           signal,
           blackboard,
@@ -352,11 +356,15 @@ function parseReviewOutput(
 ): ReviewOutput {
   const extractSection = (marker: string, source: string = techLeadText): string => {
     const regex = new RegExp(
-      `###\\s*${marker}[\\s\\S]*?(?=###\\s|$)`,
+      `(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}[\\s\\S]*?(?=(?:###|##)\\s*(?:\\d+\\.\\s*)?|$)`,
       "i"
     );
     const match = source.match(regex);
-    return match ? match[0].replace(/^###\s*${marker}\s*/i, "").trim() : "";
+    return match
+      ? match[0]
+          .replace(new RegExp(`^(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}\\s*`, "i"), "")
+          .trim()
+      : "";
   };
 
   const verdictText = extractSection("VERDICT").toUpperCase();
@@ -439,7 +447,11 @@ function determineReviewRouting(tasks: TaskNode[], results: WorkTaskResult[]) {
 
 function needsReviewRepair(reviewOutput: ReviewOutput): boolean {
   return (
-    reviewOutput.status !== "APPROVED" &&
-    reviewOutput.requiredChanges.length === 0
+    (reviewOutput.status !== "APPROVED" &&
+      reviewOutput.requiredChanges.length === 0) ||
+    (reviewOutput.status === "APPROVED" &&
+      reviewOutput.requiredChanges.some(
+        (change) => change.severity === "critical" || change.severity === "major"
+      ))
   );
 }

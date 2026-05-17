@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.7.2 — Harder to derail
+
+### Added
+- Deterministic Plan fallbacks for markdown task tables and component tables
+- DAG repair flow for duplicate IDs, dangling dependencies, and cyclic task graphs
+
+### Changed
+- Plan recovery now accepts bare JSON arrays, malformed JSON task blocks, and rich alternate artifacts as salvage sources
+- Spark and Review parsing now tolerate numbered headings as well as the canonical section format
+
+### Fixed
+- Plan can recover from rich plans whose JSON DAG contains malformed string escaping
+- Plan preserves stronger earlier artifacts when a later synthesis is weak or tool-only
+- Spark falls back to the stronger draft when final synthesis is non-substantive
+- Review no longer accepts `APPROVED` verdicts that still carry major or critical required changes
+
 ## 0.7.1 — Clearer intent, leaner review
 
 ### Added

@@ -1,6 +1,6 @@
 {
   "name": "@boofpackdev/pi-morph",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Agent orchestration layer for pi — guided 5-stage pipeline: spark → plan → work → review → ship. Mission-control TUI, browser approval gates, autonomous autorecovery, and final handoff reports.",
   "keywords": [
     "pi-package",

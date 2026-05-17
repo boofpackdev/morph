@@ -198,7 +198,7 @@ Be concise. This output flows directly to the Plan phase.`;
   }
 
   // ── Parse output into structured SparkOutput ──
-  let output = synthesisOutput;
+  let output = hasSubstantiveSparkContent(synthesisOutput) ? synthesisOutput : visionaryOutput;
   let sparkOutput = parseSparkOutput(output, prompt);
   let sparkIssues = assessSparkQuality(sparkOutput);
 
@@ -252,14 +252,14 @@ function parseSparkOutput(text: string, originalPrompt: string): SparkOutput {
   const extractSection = (marker: string): string => {
     // Match ### SECTION or ## SECTION or SECTION: 
     const regex = new RegExp(
-      `(?:###|##|#)?\\s*${marker}(?:\\s*:)?\\s*[\\s\\S]*?(?=(?:###|##|#)\\s|$)`,
+      `(?:###|##|#)?\\s*(?:\\d+\\.\\s*)?${marker}(?:\\s*:)?\\s*[\\s\\S]*?(?=(?:###|##|#)\\s*(?:\\d+\\.\\s*)?|$)`,
       "i"
     );
     const match = text.match(regex);
     if (!match) return "";
     
     return match[0]
-      .replace(new RegExp(`^(?:###|##|#)?\\s*${marker}(?:\\s*:)?\\s*`, "i"), "")
+      .replace(new RegExp(`^(?:###|##|#)?\\s*(?:\\d+\\.\\s*)?${marker}(?:\\s*:)?\\s*`, "i"), "")
       .trim();
   };
 
@@ -331,4 +331,9 @@ function assessSparkQuality(output: SparkOutput): string[] {
     issues.push("product shape is missing explicit user intent");
   }
   return issues;
+}
+
+function hasSubstantiveSparkContent(text: string): boolean {
+  const normalized = text.replace(/\[thinking\]|\[toolCall\]/gi, "").trim();
+  return normalized.length > 120;
 }

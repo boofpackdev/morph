@@ -298,7 +298,11 @@ Use the SAME targetDir for related work on the same deliverable. If the requeste
 
   // ── Parse output into structured PlanOutput ──
   const initialPlanSource = hasSubstantivePlanContent(finalOutput) ? finalOutput : architectOutput;
-  let planOutput = normalizePlanOutput(parsePlanOutput(initialPlanSource), cwd, sparkOutput);
+  let planOutput = normalizePlanOutput(
+    mergeBestPlanSections(parsePlanOutput(initialPlanSource), architectOutput),
+    cwd,
+    sparkOutput
+  );
   let planIssues = assessPlanQuality(planOutput);
 
   // If extraction degraded into a placeholder/fallback plan, repair once before
@@ -336,13 +340,17 @@ Hard requirements:
     blackboard.addTokens("plan", estimateTokens(finalOutput));
     blackboard.setFlowCheckpoint("plan", "synthesis", finalOutput);
 
-    planOutput = normalizePlanOutput(parsePlanOutput(finalOutput), cwd, sparkOutput);
+    planOutput = normalizePlanOutput(
+      mergeBestPlanSections(parsePlanOutput(finalOutput), architectOutput),
+      cwd,
+      sparkOutput
+    );
     planIssues = assessPlanQuality(planOutput);
   }
 
-  const richPlanSource = hasRichPlanWithoutJsonTasks(finalOutput)
+  const richPlanSource = hasRichPlanNeedingTaskRepair(finalOutput)
     ? finalOutput
-    : hasRichPlanWithoutJsonTasks(architectOutput)
+    : hasRichPlanNeedingTaskRepair(architectOutput)
       ? architectOutput
       : undefined;
 
@@ -356,7 +364,7 @@ Hard requirements:
       },
       nextStep: "extract machine-readable DAG",
     });
-    const taskExtractionOutput = (await runAgent(architect, {
+    let taskExtractionOutput = (await runAgent(architect, {
       cwd,
       task: `The architecture plan below is detailed, but its task DAG was not machine-readable.
 
@@ -394,7 +402,30 @@ ${richPlanSource}`,
     })).output || "";
 
     blackboard.addTokens("plan", estimateTokens(taskExtractionOutput));
-    const extractedTasks = tryExtractJsonTasks(taskExtractionOutput);
+    let extractedTasks = tryExtractJsonTasks(taskExtractionOutput);
+    if (!extractedTasks?.length) {
+      taskExtractionOutput = (await runAgent(architect, {
+        cwd,
+        task: `Your previous TASKS (DAG) response was not valid JSON.
+
+Return ONLY one valid JSON code block containing the task array.
+Rules:
+- Escape any quotation marks that appear inside string values.
+- Do not include markdown prose outside the code block.
+- Do not include comments.
+- Preserve the concrete tasks, acceptance criteria, files, dependencies, and targetDir values from the source plan.
+
+Source plan:
+${richPlanSource}`,
+        systemPrompt: synthesisSystemPrompt,
+        signal,
+        blackboard,
+        onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
+      })).output || "";
+      blackboard.addTokens("plan", estimateTokens(taskExtractionOutput));
+      extractedTasks = tryExtractJsonTasks(taskExtractionOutput);
+    }
+
     if (extractedTasks?.length) {
       planOutput = normalizePlanOutput(
         {
@@ -421,12 +452,57 @@ ${richPlanSource}`,
       "Verified no cycles"
     );
   } catch (err: any) {
+    blackboard.setPlanTelemetry({
+      ...(blackboard.getState().planTelemetry ?? createEmptyPlanTelemetry()),
+      stage: "repairing",
+      recovery: {
+        issue: `invalid DAG: ${err.message}`,
+        action: "repair task dependencies",
+      },
+      nextStep: "repair task dependencies",
+    });
+    const repairedDagOutput = (await runAgent(architect, {
+      cwd,
+      task: `The task DAG below is invalid: ${err.message}
+
+Return ONLY one valid JSON code block containing the corrected task array.
+Rules:
+- Preserve the same concrete work items wherever possible.
+- Every dependency must reference an existing task ID.
+- IDs must be unique.
+- The graph must be acyclic.
+- Do not include prose outside the code block.
+
+Current tasks:
+\`\`\`json
+${JSON.stringify(planOutput.tasks, null, 2)}
+\`\`\``,
+      systemPrompt: synthesisSystemPrompt,
+      signal,
+      blackboard,
+      onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
+    })).output || "";
+    blackboard.addTokens("plan", estimateTokens(repairedDagOutput));
+    const repairedTasks = tryExtractJsonTasks(repairedDagOutput);
+    if (!repairedTasks?.length) {
+      blackboard.recordDecision(
+        "plan",
+        `DAG validation failed: ${err.message}`,
+        "Repair did not return a usable JSON task array"
+      );
+      throw err;
+    }
+    planOutput = normalizePlanOutput({ ...planOutput, tasks: repairedTasks }, cwd, sparkOutput);
+    const repairedIssues = assessPlanQuality(planOutput);
+    if (repairedIssues.length > 0) {
+      throw new Error(`Plan DAG repair produced unusable tasks: ${repairedIssues.join("; ")}`);
+    }
+    const sorted = topologicalSort(planOutput.tasks);
     blackboard.recordDecision(
       "plan",
-      `DAG validation failed: ${err.message}`,
-      "Will retry with fix"
+      `DAG repaired: ${sorted.length} tasks in topological order`,
+      "Recovered invalid task dependencies"
     );
-    throw err;
   }
 
   blackboard.recordDecision(
@@ -528,6 +604,18 @@ function tryExtractJsonTasks(text: string): TaskNode[] | null {
       continue;
     }
   }
+
+  const bareArray = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+  if (bareArray) {
+    try {
+      const parsed = JSON.parse(bareArray[0]);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as TaskNode[];
+      }
+    } catch {
+      // fall through to other recovery paths
+    }
+  }
   return null;
 }
 
@@ -582,6 +670,9 @@ function parseTasks(text: string): TaskNode[] {
   // PRIORITY 1: Try to extract proper JSON array of tasks
   const jsonTasks = tryExtractJsonTasks(text);
   if (jsonTasks) return jsonTasks;
+
+  const tableTasks = parseTaskTable(text);
+  if (tableTasks.length) return tableTasks;
 
   // PRIORITY 2: Fallback — look for task-like lines, filtering out non-tasks
   const tasks: TaskNode[] = [];
@@ -853,6 +944,15 @@ function parseComponents(
     }
   }
 
+  for (const row of parseMarkdownTableRows(text)) {
+    if (!row.component || !row.responsibility) continue;
+    components.push({
+      name: row.component,
+      responsibility: row.responsibility,
+      dependsOn: splitListCell(row.dependencies),
+    });
+  }
+
   return components;
 }
 
@@ -912,6 +1012,27 @@ function hasRichPlanWithoutJsonTasks(text: string): boolean {
   return (hasTaskTable || hasTaskHeading) && !hasJsonTasks;
 }
 
+function hasRichPlanNeedingTaskRepair(text: string): boolean {
+  return hasRichPlanWithoutJsonTasks(text) || hasMalformedJsonTaskBlock(text);
+}
+
+function hasMalformedJsonTaskBlock(text: string): boolean {
+  return /```json\s*[\s\S]*?```/i.test(text) && tryExtractJsonTasks(text) === null;
+}
+
+function mergeBestPlanSections(plan: PlanOutput, architectOutput: string): PlanOutput {
+  const architectPlan = parsePlanOutput(architectOutput);
+  return {
+    ...plan,
+    architectureDiagram:
+      plan.architectureDiagram.trim() === "graph TB\n  A[System] --> B[Components]"
+        ? architectPlan.architectureDiagram
+        : plan.architectureDiagram,
+    dataModels: plan.dataModels.length ? plan.dataModels : architectPlan.dataModels,
+    componentTree: plan.componentTree.length ? plan.componentTree : architectPlan.componentTree,
+  };
+}
+
 function hasSubstantivePlanContent(text: string): boolean {
   const normalized = text.replace(/\[thinking\]|\[toolCall\]/gi, "").trim();
   return normalized.length > 120;
@@ -957,4 +1078,73 @@ function countTaskLikeRows(text: string): number {
   return text
     .split("\n")
     .filter((line) => /^\|\s*\*{0,2}[A-Z]+-\d+\*{0,2}\s*\|/.test(line.trim())).length;
+}
+
+function parseTaskTable(text: string): TaskNode[] {
+  const rows = parseMarkdownTableRows(text);
+  return rows
+    .filter((row) => row.id && row.description && row.acceptancecriteria)
+    .map((row) => ({
+      id: row.id!,
+      description: row.description!,
+      category: normalizeTaskCategory(row.category),
+      dependsOn: splitListCell(row.dependson),
+      acceptanceCriteria: row.acceptancecriteria!,
+      estimatedComplexity: normalizeTaskComplexity(row.complexity),
+      files: splitListCell(row.files),
+      targetDir: row.targetdir || ".",
+    }));
+}
+
+function parseMarkdownTableRows(text: string): Array<Record<string, string>> {
+  const lines = text.split("\n");
+  const rows: Array<Record<string, string>> = [];
+
+  for (let index = 0; index < lines.length - 2; index++) {
+    const header = lines[index].trim();
+    const separator = lines[index + 1].trim();
+    if (!header.startsWith("|") || !separator.startsWith("|") || !/^-{3,}/.test(separator.replace(/[|:\s]/g, ""))) {
+      continue;
+    }
+
+    const headers = splitTableLine(header).map((cell) =>
+      cell.toLowerCase().replace(/[^a-z]/g, "")
+    );
+    if (!headers.length) continue;
+
+    let rowIndex = index + 2;
+    while (rowIndex < lines.length && lines[rowIndex].trim().startsWith("|")) {
+      const cells = splitTableLine(lines[rowIndex]);
+      if (cells.length === headers.length) {
+        const row: Record<string, string> = {};
+        headers.forEach((key, cellIndex) => {
+          row[key] = cells[cellIndex];
+        });
+        rows.push(row);
+      }
+      rowIndex++;
+    }
+    index = rowIndex - 1;
+  }
+
+  return rows;
+}
+
+function splitTableLine(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.replace(/\*\*/g, "").replace(/`/g, "").trim());
+}
+
+function splitListCell(value: string | undefined): string[] {
+  if (!value || /^\[\]$/.test(value.trim()) || /^none$/i.test(value.trim())) return [];
+  return value
+    .replace(/^\[/, "")
+    .replace(/\]$/, "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
