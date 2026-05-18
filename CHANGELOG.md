@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.10 - Say what is true now
+
+### Fixed
+- Startup no longer posts an “unfinished flow detected” warning when the user immediately resumes that flow into active execution
+- Recovery notices are now shown only when a flow is actually paused and waiting for an operator action
+- Resume messaging now distinguishes an active recovered run from an idle recoverable snapshot
+
 ## 0.7.9 - Create the room before entering it
 
 ### Fixed
