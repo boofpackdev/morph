@@ -6,6 +6,18 @@ import { Blackboard } from "../core/blackboard.js";
 
 export const serverEvents = new EventEmitter();
 
+const rateLimitMap = new Map<string, number[]>();
+
+function checkRateLimit(key: string): boolean {
+  const now = Date.now();
+  const window = rateLimitMap.get(key) || [];
+  const recent = window.filter((t) => now - t < 1000);
+  if (recent.length >= 10) return false;
+  recent.push(now);
+  rateLimitMap.set(key, recent);
+  return true;
+}
+
 export function startMorphServer(bb: Blackboard, port: number = 4040): http.Server {
   const server = http.createServer((req, res) => {
     if (req.method === "OPTIONS" && (req.url === "/api/approve" || req.url === "/api/reject")) {
@@ -19,8 +31,21 @@ export function startMorphServer(bb: Blackboard, port: number = 4040): http.Serv
     }
 
     if (req.method === "POST" && (req.url === "/api/approve" || req.url === "/api/reject")) {
+      const endpoint = req.url || "/";
+      if (!checkRateLimit(endpoint)) {
+        res.writeHead(429, { "Access-Control-Allow-Origin": "*" });
+        res.end("Too Many Requests");
+        return;
+      }
       let body = "";
-      req.on("data", chunk => { body += chunk.toString(); });
+      req.on("data", chunk => {
+        body += chunk.toString();
+        if (body.length > 10240) {
+          res.writeHead(413, { "Access-Control-Allow-Origin": "*" });
+          res.end("Payload too large");
+          req.destroy();
+        }
+      });
       req.on("end", () => {
         try {
           const data = JSON.parse(body);
@@ -43,7 +68,18 @@ export function startMorphServer(bb: Blackboard, port: number = 4040): http.Serv
     res.end(INDEX_HTML);
   });
 
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: ({ origin }: { origin: string; secure: boolean; req: http.IncomingMessage }) => {
+      if (!origin || origin === "null") return true;
+      try {
+        const url = new URL(origin);
+        return url.hostname === "localhost" || url.hostname === "127.0.0.1";
+      } catch {
+        return false;
+      }
+    },
+  });
   
   bb.subscribe(() => {
     const state = JSON.stringify(bb.getState());

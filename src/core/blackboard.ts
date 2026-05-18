@@ -12,6 +12,7 @@
  *   - Phase transition enforcement
  */
 
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MorphPhase, MorphState } from "../schemas/contracts.js";
@@ -47,7 +48,7 @@ function ensureDir(dir: string): void {
 export function createInitialState(): MorphState {
   return {
     phase: "idle",
-    config: {},
+    config: { source: "inherited" },
     workResults: [],
     tokenLedger: { spark: 0, plan: 0, work: 0, review: 0, ship: 0, total: 0 },
     activeAgents: [],
@@ -70,6 +71,8 @@ export class Blackboard {
   private cwd: string;
   private state: MorphState;
   private listeners: Array<() => void> = [];
+  private dirty = false;
+  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(cwd: string) {
     this.cwd = cwd;
@@ -137,26 +140,56 @@ export class Blackboard {
     return createInitialState();
   }
 
-  /** Persist current state to disk. */
-  save(): void {
+  /** Schedule a deferred save. Multiple calls within the same tick only flush once. */
+  private scheduleSave(): void {
+    this.dirty = true;
+    if (!this.saveTimeout) {
+      this.saveTimeout = setTimeout(() => this.flush(), 0);
+    }
+  }
+
+  /** Flush all pending mutations to disk immediately. Called at phase boundaries. */
+  flush(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    if (!this.dirty) return;
+    this.dirty = false;
+
     const statePath = getStatePath(this.cwd);
     ensureDir(getMorphDir(this.cwd));
 
-    // Atomic write
-    const tmpPath = `${statePath}.${process.pid}.${Date.now()}.tmp`;
+    // Atomic write with random temp filename
+    const tmpPath = `${statePath}.${crypto.randomUUID()}.tmp`;
     const payload = JSON.stringify(this.state, null, 2) + "\n";
     fs.writeFileSync(tmpPath, payload, "utf-8");
     try {
       fs.renameSync(tmpPath, statePath);
     } catch (err: any) {
       if (err.code === "EPERM" || err.code === "EBUSY") {
-        fs.writeFileSync(statePath, payload, "utf-8");
+        // Retry rename with backoff before falling back to direct write
+        let renamed = false;
+        for (let retry = 0; retry < 3; retry++) {
+          try { fs.renameSync(tmpPath, statePath); renamed = true; break; } catch { /* retry */ }
+          const start = Date.now();
+          while (Date.now() - start < 50) { /* 50ms backoff */ }
+        }
+        if (!renamed) {
+          console.warn(`morph: atomic rename failed after retries, falling back to direct write for ${statePath}`);
+          fs.writeFileSync(statePath, payload, "utf-8");
+        }
         try { fs.unlinkSync(tmpPath); } catch { /* cleanup */ }
       } else {
         throw err;
       }
     }
     this.notify();
+  }
+
+  /** Persist current state to disk (delegates to batched scheduleSave). */
+  private save(): void {
+    this.scheduleSave();
   }
 
   /** Archive current state for debugging. */
@@ -167,6 +200,17 @@ export class Blackboard {
       `archived-${reason}-${ts}.json`
     );
     fs.writeFileSync(archivePath, JSON.stringify(data, null, 2), "utf-8");
+  }
+
+  /** Persist a recoverable snapshot of the current state before risky mutations. */
+  archiveCurrentState(reason: string): string {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const archivePath = path.join(
+      getHistoryDir(this.cwd),
+      `snapshot-${reason}-${ts}.json`
+    );
+    fs.writeFileSync(archivePath, JSON.stringify(this.state, null, 2), "utf-8");
+    return archivePath;
   }
 
   /** Get full current state (read-only snapshot). */
@@ -215,17 +259,22 @@ export class Blackboard {
   /** Restore a previously archived snapshot into active state. */
   restoreArchivedState(archive: ArchivedMorphState): void {
     this.state = archive.state;
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Transition to a new phase. Enforces valid flow. */
   transition(target: MorphPhase): void {
+    if (!this.state.startedAt && target !== "idle") {
+      this.state.startedAt = new Date().toISOString();
+    }
     this.state.phase = target;
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Update global config overrides (e.g. from TUI). */
-  setConfig(config: { provider?: string; model?: string }): void {
+  setConfig(config: { provider?: string; model?: string; source?: "inherited" | "manual" }): void {
     this.state.config = { ...this.state.config, ...config };
     this.save();
   }
@@ -259,7 +308,8 @@ export class Blackboard {
     delete this.state.planTelemetry;
     delete this.state.flowCheckpoints.spark;
     this.state.phase = "plan";
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Store plan output and move to work phase. */
@@ -267,7 +317,8 @@ export class Blackboard {
     this.state.planOutput = output;
     delete this.state.flowCheckpoints.plan;
     this.state.phase = "work";
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   setPlanTelemetry(output: MorphState["planTelemetry"]): void {
@@ -290,12 +341,22 @@ export class Blackboard {
 
   /** Clear work results for specific tasks (to trigger re-work). */
   clearWorkResults(taskIds?: string[]): void {
+    const idsToRemove = taskIds ? new Set(taskIds) : null;
+    const removesCompletedWork = this.state.workResults.some(
+      (result) =>
+        result.status === "done" &&
+        (!idsToRemove || idsToRemove.has(result.taskId))
+    );
+
+    if (removesCompletedWork) {
+      this.archiveCurrentState("before-work-result-clear");
+    }
+
     if (!taskIds) {
       this.state.workResults = [];
     } else {
-      const idSet = new Set(taskIds);
       this.state.workResults = this.state.workResults.filter(
-        (r) => !idSet.has(r.taskId)
+        (r) => !idsToRemove!.has(r.taskId)
       );
     }
     this.save();
@@ -309,7 +370,8 @@ export class Blackboard {
     this.state.reviewTelemetry = undefined;
     delete this.state.flowCheckpoints.review;
     this.state.phase = "review";
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Store review output. */
@@ -321,7 +383,8 @@ export class Blackboard {
     } else {
       this.state.phase = "work"; // Loop back
     }
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   setReviewTelemetry(output: MorphState["reviewTelemetry"]): void {
@@ -334,7 +397,8 @@ export class Blackboard {
     this.state.shipOutput = output;
     delete this.state.flowCheckpoints.ship;
     this.state.phase = "done";
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Add tokens to the ledger for a phase. */
@@ -381,12 +445,16 @@ export class Blackboard {
       // Keep completed tasks, just reset phase
       this.state.phase = "work";
     } else if (phase === "plan") {
+      if (this.state.workResults.some((result) => result.status === "done")) {
+        this.archiveCurrentState("before-plan-reset");
+      }
       this.state.planOutput = undefined;
       this.state.workResults = [];
       delete this.state.flowCheckpoints.plan;
       this.state.phase = "spark";
     }
-    this.save();
+    this.dirty = true;
+    this.flush();
   }
 
   /** Get a summary of the state for agent context. */

@@ -31,7 +31,80 @@ import type {
 import { generateDiff } from "../utils/diff.js";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
+
+// ── Post-Implementation Verification ──
+
+interface ProjectCommands {
+  test: string[];
+  build: string[];
+  typeCheck: string[];
+}
+
+function detectProjectCommands(cwd: string): ProjectCommands | null {
+  if (fs.existsSync(path.join(cwd, "package.json"))) {
+    return { test: ["npm", "test"], build: [], typeCheck: ["npx", "tsc", "--noEmit"] };
+  }
+  if (fs.existsSync(path.join(cwd, "Cargo.toml"))) {
+    return { test: ["cargo", "test"], build: ["cargo", "check"], typeCheck: [] };
+  }
+  if (fs.existsSync(path.join(cwd, "pyproject.toml")) || fs.existsSync(path.join(cwd, "requirements.txt"))) {
+    return { test: ["pytest"], build: [], typeCheck: ["mypy", "."] };
+  }
+  if (fs.existsSync(path.join(cwd, "go.mod"))) {
+    return { test: ["go", "test", "./..."], build: [], typeCheck: ["go", "vet", "./..."] };
+  }
+  if (fs.existsSync(path.join(cwd, "Makefile"))) {
+    return { test: ["make", "test"], build: ["make", "build"], typeCheck: [] };
+  }
+  return null;
+}
+
+function execCheckCommand(cwd: string, cmd: string[]): { passed: boolean; output: string } {
+  try {
+    const stdout = execSync(cmd.join(" "), { cwd, timeout: 30000, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
+    return { passed: true, output: stdout.slice(0, 2000) };
+  } catch (err: any) {
+    return { passed: false, output: (err.stdout || err.stderr || err.message || "").slice(0, 2000) };
+  }
+}
+
+function runPostImplementationChecks(
+  cwd: string
+): { testsPassed: boolean; buildPassed: boolean; lintPassed: boolean; typeCheckPassed: boolean; output: string } {
+  const cmds = detectProjectCommands(cwd);
+  if (!cmds) {
+    return {
+      testsPassed: true, buildPassed: true, lintPassed: true, typeCheckPassed: true,
+      output: "No recognized project type for automatic verification.",
+    };
+  }
+
+  const results: string[] = [];
+  let testsPassed = true;
+  let buildPassed = true;
+  let typeCheckPassed = true;
+
+  if (cmds.test.length > 0) {
+    const r = execCheckCommand(cwd, cmds.test);
+    testsPassed = r.passed;
+    results.push(`[${r.passed ? "PASS" : "FAIL"}] ${cmds.test.join(" ")}\n${r.output}`);
+  }
+  if (cmds.build.length > 0) {
+    const r = execCheckCommand(cwd, cmds.build);
+    buildPassed = r.passed;
+    results.push(`[${r.passed ? "PASS" : "FAIL"}] ${cmds.build.join(" ")}\n${r.output}`);
+  }
+  if (cmds.typeCheck.length > 0) {
+    const r = execCheckCommand(cwd, cmds.typeCheck);
+    typeCheckPassed = r.passed;
+    results.push(`[${r.passed ? "PASS" : "FAIL"}] ${cmds.typeCheck.join(" ")}\n${r.output}`);
+  }
+
+  return { testsPassed, buildPassed, lintPassed: true, typeCheckPassed, output: results.join("\n\n") };
+}
+
+// ── Flow ──
 
 export interface WorkFlowOptions {
   cwd: string;
@@ -41,6 +114,8 @@ export interface WorkFlowOptions {
   signal?: AbortSignal;
   /** Called before each wave for HITL approval */
   onWaveStart?: (wave: TaskNode[], waveIndex: number) => Promise<boolean>;
+  /** Called when a task actually enters an executing batch. */
+  onTaskStart?: (task: TaskNode) => void;
   /** Called after each task completes */
   onTaskComplete?: (result: WorkTaskResult) => void;
   /** Called while a task is running with worktree-derived file changes since task start */
@@ -67,6 +142,7 @@ export async function executeWorkFlow(
     maxParallel = 3,
     signal,
     onWaveStart,
+    onTaskStart,
     onTaskComplete,
     onTaskActivity,
     onAgentEvent,
@@ -104,7 +180,11 @@ export async function executeWorkFlow(
     state.workResults.map((r) => r.taskId)
   );
   const allResults: WorkTaskResult[] = [...state.workResults];
+  // Cross-task dependency summaries: when a task completes, its summary is
+  // forwarded to every downstream task that lists it as a dependency.
+  const depSummaries = new Map<string, string[]>();
   let waveIndex = 0;
+  let stopSchedulingAfterBatch = false;
 
   // Process waves
   while (processedIds.size < sorted.length) {
@@ -161,6 +241,10 @@ export async function executeWorkFlow(
     }
 
     for (const batch of batches) {
+      for (const task of batch) {
+        onTaskStart?.(task);
+      }
+
       const batchResults = await Promise.all(
         batch.map((task) =>
           executeSingleTask(
@@ -173,18 +257,44 @@ export async function executeWorkFlow(
             signal,
             onTaskComplete,
             onTaskActivity,
-            onAgentEvent
+            onAgentEvent,
+            depSummaries
           )
         )
       );
 
+      const systemicFailures = batchResults.filter(isSystemicFailureResult);
+      const duplicateSystemicFailureTaskIds = systemicFailures.slice(1).map((result) => result.taskId);
+      if (duplicateSystemicFailureTaskIds.length > 0) {
+        blackboard.clearWorkResults(duplicateSystemicFailureTaskIds);
+      }
+
       for (const result of batchResults) {
+        if (duplicateSystemicFailureTaskIds.includes(result.taskId)) continue;
         allResults.push(result);
         processedIds.add(result.taskId);
         if (result.status === "done") {
           completedIds.add(result.taskId);
+          // Forward this task's summary to all downstream dependents
+          const summaryBlock = `- **${result.taskId}** (${taskById.get(result.taskId)?.description ?? "no description"}): ${result.summary}\n  Files: ${result.filesChanged.join(", ") || "none"}`;
+          for (const t of planOutput.tasks) {
+            if (t.dependsOn.includes(result.taskId)) {
+              const existing = depSummaries.get(t.id) || [];
+              existing.push(summaryBlock);
+              depSummaries.set(t.id, existing);
+            }
+          }
         }
       }
+
+      if (systemicFailures.length > 0 || batchResults.some(isReviewRecoveryHaltResult)) {
+        stopSchedulingAfterBatch = true;
+        break;
+      }
+    }
+
+    if (stopSchedulingAfterBatch) {
+      break;
     }
 
     waveIndex++;
@@ -227,7 +337,10 @@ function commitScaffoldResults(task: TaskNode, cwd: string): void {
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     if (status) {
-      execSync(`git commit -m "morph: auto-commit ${task.id} â€” ${task.description.slice(0, 60)}" --no-verify`, {
+      const sanitizedId = task.id.replace(/[^a-zA-Z0-9_-]/g, "-");
+      const sanitizedDesc = task.description.slice(0, 60).replace(/[^\x20-\x7E]/g, "");
+      const commitMsg = `morph: auto-commit ${sanitizedId} \u2014 ${sanitizedDesc}`;
+      execFileSync("git", ["commit", "-m", commitMsg, "--no-verify"], {
         cwd: repoDir,
         timeout: 10000,
         stdio: "pipe",
@@ -334,9 +447,21 @@ function isIgnoredActivityPath(file: string): boolean {
   );
 }
 
+// Shared git snapshot cache for parallel tasks — avoids spawning duplicate git subprocesses
+let cachedSnapshot: { ts: number; snapshot: Map<string, WorktreeFileSnapshot> } | null = null;
+
 function snapshotWorkingTree(repoRoot: string | null, fallbackRoot?: string): Map<string, WorktreeFileSnapshot> {
+  // Return cached snapshot if it's less than 2000ms old — all parallel tasks share one snapshot
+  if (cachedSnapshot && Date.now() - cachedSnapshot.ts < 2000) {
+    return cachedSnapshot.snapshot;
+  }
+
+  let result: Map<string, WorktreeFileSnapshot>;
+
   if (!repoRoot) {
-    return fallbackRoot ? snapshotPlainDirectory(fallbackRoot) : new Map();
+    result = fallbackRoot ? snapshotPlainDirectory(fallbackRoot) : new Map();
+    cachedSnapshot = { ts: Date.now(), snapshot: result };
+    return result;
   }
   try {
     const tracked = execSync("git ls-files", {
@@ -369,9 +494,13 @@ function snapshotWorkingTree(repoRoot: string | null, fallbackRoot?: string): Ma
         snapshot.set(file, { fingerprint: "missing", lineCount: 0 });
       }
     }
-    return snapshot;
+    result = snapshot;
+    cachedSnapshot = { ts: Date.now(), snapshot: result };
+    return result;
   } catch {
-    return new Map();
+    result = new Map();
+    cachedSnapshot = { ts: Date.now(), snapshot: result };
+    return result;
   }
 }
 
@@ -379,9 +508,14 @@ function countLinesIfTextFile(filePath: string, size?: number): number | undefin
   try {
     const statSize = size ?? fs.statSync(filePath).size;
     if (statSize > 1_000_000) return undefined;
-    const content = fs.readFileSync(filePath, "utf-8");
-    if (!content) return 0;
-    return content.split(/\r?\n/).length;
+    // Read as buffer and count \n bytes instead of reading entire file as a UTF-8 string
+    const buf = fs.readFileSync(filePath);
+    if (buf.byteLength === 0) return 0;
+    let count = 1; // start at 1 since the last line may not have a trailing \n
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] === 10) count++; // 10 is ASCII for \n
+    }
+    return count;
   } catch {
     return undefined;
   }
@@ -525,6 +659,9 @@ function buildVerification(
     task.files && task.files.length > 0 ? matchedExpectedFiles.length > 0 : undefined;
 
   if (!changedFilesDetected) notes.push("No repository file changes were detected during the task attempt.");
+  if (!changedFilesDetected && expectedFilesSatisfied === true) {
+    notes.push("Expected task artifacts already exist on disk; this may be an already-satisfied rerun rather than a no-op failure.");
+  }
   if (task.files?.length && !expectedFilesSatisfied) {
     notes.push(`None of the expected file targets were found or changed: ${task.files.join(", ")}`);
   }
@@ -541,7 +678,7 @@ function classifyVerificationFailure(
   task: TaskNode,
   verification: NonNullable<WorkTaskResult["verification"]>
 ): { kind: NonNullable<WorkTaskResult["failureKind"]>; evidence: string[] } | null {
-  if (!verification.changedFilesDetected) {
+  if (!verification.changedFilesDetected && verification.expectedFilesSatisfied !== true) {
     return {
       kind: "NO_EFFECT",
       evidence: ["Task attempt completed without any detected file changes."],
@@ -562,6 +699,15 @@ function parseReviewerVerdict(text: string): "APPROVED" | "CHANGES_REQUESTED" | 
   return match[1].toUpperCase() as "APPROVED" | "CHANGES_REQUESTED";
 }
 
+/** Infer verdict from review content before spawning a costly retry agent. */
+function inferVerdictFromContent(text: string): "APPROVED" | "CHANGES_REQUESTED" | undefined {
+  const approvedPattern = /(?<!not\s)(?:looks?\s*great|looks?\s*good|LGTM|lgtm|no\s*issues?\s*found|ready\s*to\s*merge|approved?)/i;
+  const changesPattern = /(?:needs?\s*(?:changes?|work|fix)|must\s*(?:fix|change)|requires?\s*(?:changes?|modification)|SHOULD\s*(?:NOT|NOT)\s*MERGE)/i;
+  if (approvedPattern.test(text)) return "APPROVED";
+  if (changesPattern.test(text)) return "CHANGES_REQUESTED";
+  return undefined;
+}
+
 function classifyToolFailure(summary: string): NonNullable<WorkTaskResult["failureKind"]> {
   const normalized = summary.toLowerCase();
   if (normalized.includes("spawn ") && normalized.includes(" enoent")) {
@@ -573,11 +719,25 @@ function classifyToolFailure(summary: string): NonNullable<WorkTaskResult["failu
     normalized.includes("insufficient quota") ||
     normalized.includes("quota exceeded") ||
     normalized.includes("401 unauthorized") ||
-    normalized.includes("invalid api key")
+    normalized.includes("401 invalid token") ||
+    normalized.includes("invalid api key") ||
+    normalized.includes("invalid token")
   ) {
     return "AUTH_OR_QUOTA_FAILURE";
   }
   return "TOOL_FAILURE";
+}
+
+function isSystemicFailureResult(result: WorkTaskResult): boolean {
+  return (
+    result.status === "failed" &&
+    (result.failureKind === "AUTH_OR_QUOTA_FAILURE" ||
+      result.failureKind === "CLI_LAUNCH_FAILURE")
+  );
+}
+
+function isReviewRecoveryHaltResult(result: WorkTaskResult): boolean {
+  return result.status === "blocked" && result.failureKind === "REVIEW_FORMAT_INVALID";
 }
 
 /**
@@ -623,13 +783,18 @@ async function executeSingleTask(
   signal?: AbortSignal,
   onTaskComplete?: (result: WorkTaskResult) => void,
   onTaskActivity?: (taskId: string, activity: WorktreeFileActivity[]) => void,
-  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void
+  onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void,
+  depSummaries?: Map<string, string[]>
 ): Promise<WorkTaskResult> {
   // Task files are planned relative to the project root, but targetDir is only
   // a preferred working directory. Some tasks intentionally create that
   // directory (for example `.github/workflows`), so do not make process launch
   // depend on the directory already existing.
-  const preferredTaskCwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+  let preferredTaskCwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+  const resolvedBase = path.resolve(baseCwd);
+  if (!preferredTaskCwd.startsWith(resolvedBase + path.sep) && preferredTaskCwd !== resolvedBase) {
+    preferredTaskCwd = baseCwd; // Prevent path traversal via absolute targetDir
+  }
   const targetDirExists = fs.existsSync(preferredTaskCwd);
   const cwd = targetDirExists ? preferredTaskCwd : baseCwd;
   const repoRoot = findGitRoot(baseCwd);
@@ -682,7 +847,8 @@ ${reviewOutput.userPerspectiveFeedback}`;
       );
     };
     reportTaskActivity();
-    const activityInterval = setInterval(reportTaskActivity, 750);
+    // 2000ms interval — all parallel tasks share one cached git snapshot
+    const activityInterval = setInterval(reportTaskActivity, 2000);
     if (attempt > 1) {
       blackboard.incrementRetry(task.id);
     }
@@ -700,6 +866,11 @@ ${reviewOutput.userPerspectiveFeedback}`;
       ? `\n\n## Target Directory\nAll file operations should be within \`${task.targetDir}\` relative to the project root.${targetDirExists ? "" : " This directory does not exist yet; create it if needed for the task."}`
       : "";
 
+    const depSummariesForTask = depSummaries?.get(task.id);
+    const depSummaryBlock = depSummariesForTask && depSummariesForTask.length > 0
+      ? `\n\n## Completed Dependencies\n${depSummariesForTask.join("\n\n")}`
+      : "";
+
     const engSystemPrompt = `You are the **Primary Engineer** for the morph orchestration pipeline.
 
 ## Your Role
@@ -711,7 +882,7 @@ efficient code. Follow best practices for the tech stack in use.
 - Category: ${task.category}
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}
-- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${globalReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}${recoverySkillBlock}
+- Complexity: ${task.estimatedComplexity}${humanReviewBlock}${globalReviewBlock}${feedbackBlock}${targetDirNote}${docsContextBlock}${recoverySkillBlock}${depSummaryBlock}
 
 ## Instructions
 1. Read relevant existing files first
@@ -729,7 +900,8 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
     try {
       engResult = await runAgent(engineer, {
         cwd,
-        task: `Implement task ${task.id}: ${task.description}\n\nAcceptance criteria: ${task.acceptanceCriteria}\n\nGet it done.`,
+        // Description and acceptanceCriteria are already in the system prompt — no need to duplicate
+        task: `Implement task ${task.id}. Your detailed instructions are in the system prompt. Get it done.`,
         systemPrompt: engSystemPrompt,
         signal,
         blackboard,
@@ -847,9 +1019,16 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
     let reviewOutput = revResult.output || "";
     let reviewerVerdict = parseReviewerVerdict(reviewOutput);
 
-    // Reviewer models sometimes prepend "thinking" or omit the required
-    // verdict entirely. Repair the review format once before spending another
-    // engineer implementation attempt on what may only be malformed output.
+    // Attempt verdict inference before spawning a costly retry agent
+    if (!reviewerVerdict) {
+      const inferred = inferVerdictFromContent(reviewOutput);
+      if (inferred) {
+        reviewerVerdict = inferred;
+        reviewOutput = `[Inferred verdict: ${inferred} (inferred from review content)]\n\n${reviewOutput}`;
+      }
+    }
+
+    // Fallback: spawn retry agent only if inference also failed
     if (!reviewerVerdict) {
       const verdictRetryResult = await runAgent(reviewer, {
         cwd,
@@ -911,12 +1090,21 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         return result;
       }
 
+      // Deterministic post-implementation verification
+      const checkResults = runPostImplementationChecks(baseCwd);
+      if (checkResults.output) {
+        verification.notes.push(`\n[Post-implementation checks]\n${checkResults.output}`);
+      }
+
       const result: WorkTaskResult = {
         taskId: task.id,
         status: "done",
         summary: engResult.output || "Task completed",
         filesChanged: changedFiles,
-        testsPassed: true,
+        testsPassed: checkResults.testsPassed,
+        buildPassed: checkResults.buildPassed,
+        lintPassed: checkResults.lintPassed,
+        typeCheckPassed: checkResults.typeCheckPassed,
         attemptCount: attempt,
         failureEvidence: [],
         verification,
@@ -931,8 +1119,8 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       reportTaskActivity();
       const result: WorkTaskResult = {
         taskId: task.id,
-        status: "failed",
-        summary: "Peer reviewer returned no valid verdict after a formatting retry.",
+        status: "blocked",
+        summary: "Peer reviewer returned no valid verdict after a formatting retry; implementation awaits review recovery.",
         notes: reviewOutput.slice(0, 500),
         filesChanged: mergeChangedFiles(
           diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),

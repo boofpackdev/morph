@@ -27,6 +27,8 @@ const SPINNERS = isWin32 ? {
   helix: ["⢉", "⢊", "⢔", "⢖", "⢙", "⢚", "⢠", "⢢"],
 };
 
+const ACTIVE_PHASE_FRAMES = ["◆", "◇"];
+
 // ── Phase metadata ──
 
 const PHASE_ORDER = ["idle", "spark", "plan", "work", "review", "ship", "done"] as const;
@@ -114,6 +116,10 @@ export interface PipelineDisplay {
   agents: AgentActivity[];
   tokenLedger: { spark: number; plan: number; work: number; review: number; ship: number; total: number };
   tick: number;
+  startedAt?: string;
+  versionLabel?: string;
+  runtimeLabel?: string;
+  profileLabel?: string;
   subagentActivities?: SubagentActivity[];
   fileActivities?: FileActivity[];
   fileCollisions?: FileCollision[];
@@ -147,40 +153,6 @@ export function buildPipelineProgressWidget(
   getDisplay: () => PipelineDisplay,
   theme: Theme
 ): { render: (width: number) => string[]; invalidate: () => void } {
-  const barW = 16;
-
-  function phaseBar(
-    display: PipelineDisplay,
-    phaseId: string,
-    status: "done" | "current" | "pending" | "failed",
-    tick: number
-  ): string {
-    if (status === "done") return "█".repeat(barW);
-    if (status !== "current") return "░".repeat(barW);
-
-    if (phaseId === "work" && display.tasks.length > 0) {
-      const completed = display.tasks.filter((task) => task.status === "done").length;
-      const filled = Math.round((completed / display.tasks.length) * barW);
-      return "█".repeat(filled) + "░".repeat(barW - filled);
-    }
-
-    // For phases without a truthful denominator, animate activity instead of
-    // implying a fake percentage.
-    const head = tick % barW;
-    return Array.from({ length: barW }, (_, index) =>
-      index === head || index === (head + 1) % barW ? "█" : "░"
-    ).join("");
-  }
-
-  function phaseStatus(displayPhase: string, phaseId: string): "done" | "current" | "pending" | "failed" {
-    const currentIdx = PHASE_ORDER.indexOf(displayPhase as any);
-    const idx = PHASE_ORDER.indexOf(phaseId as any);
-    if (idx < 0 || currentIdx < 0) return "pending";
-    if (idx < currentIdx) return "done";
-    if (idx === currentIdx) return "current";
-    return "pending";
-  }
-
   return {
     render: (width: number) => {
       const display = getDisplay();
@@ -204,62 +176,9 @@ export function buildPipelineProgressWidget(
         return lines;
       }
 
-      // Title
-      lines.push(`  ${indicator} ${theme.fg("accent", theme.bold("morph — PIPELINE PROGRESS"))}`);
-      lines.push("");
+      lines.push(...buildPipelineCockpit(display, theme, tick));
 
-      for (const phase of ALL_PHASES) {
-        const status = phaseStatus(display.phase, phase.id);
-        const barStr = phaseBar(display, phase.id, status, tick);
-        
-        let sIcon = theme.fg("dim", "(o)");
-        let coloredBar = theme.fg("dim", barStr);
-        let labelColor: any = "dim";
-
-        if (status === "done") {
-          sIcon = theme.fg("success", "✓");
-          coloredBar = theme.fg("success", barStr);
-          labelColor = "success";
-        } else if (status === "current") {
-          const spin = SPINNERS.pulse[tick % SPINNERS.pulse.length];
-          sIcon = theme.fg("accent", spin);
-          coloredBar = theme.fg("accent", barStr);
-          labelColor = "accent";
-        }
-
-        // Pad the label manually avoiding ANSI width issues
-        const rawLabel = `${phase.icon} ${phase.label}`;
-        const padAmount = 11 - rawLabel.length;
-        const paddedLabel = theme.fg(labelColor, rawLabel + " ".repeat(Math.max(0, padAmount)));
-
-        lines.push(`  ${paddedLabel}${coloredBar}  ${sIcon}`);
-      }
-
-      lines.push("");
-
-      // Task summary (only in work phase)
-      if (display.phase === "work" && display.tasks.length > 0) {
-        const done = display.tasks.filter((t) => t.status === "done").length;
-        const failed = display.tasks.filter((t) => t.status === "failed" || t.status === "blocked").length;
-        const total = display.tasks.length;
-        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-        const color = done === total ? "success" : "accent";
-        lines.push(`   ${theme.fg(color, `TASKS: ${done}/${total} (${pct}%)`)}` + (failed > 0 ? theme.fg("error", `  ${failed} failed`) : ""));
-      }
-
-      // Token cost
-      if (display.tokenLedger.total > 0) {
-        lines.push(`   ${theme.fg("muted", `TOKENS: ${formatDisplayTokens(display.tokenLedger.total)}`)}`);     
-      }
-
-      // Bottom hint
-      if (display.phase !== "done") {
-        lines.push(
-          theme.fg("dim", `   ${buildFooterHint(display)}`)
-        );
-      }
-
-      const leftColumnWidth = 35;
+      const leftColumnWidth = 44;
       const columnGap = 3;
       const contextLines = buildOperatorPanel(
         display,
@@ -299,39 +218,233 @@ function combineColumns(left: string[], right: string[], leftWidth: number, gap:
   return lines;
 }
 
+function buildPipelineCockpit(
+  display: PipelineDisplay,
+  theme: Theme,
+  tick: number
+): string[] {
+  const innerWidth = 40;
+  const border = "─".repeat(innerWidth);
+  const version = display.versionLabel ? ` v${display.versionLabel}` : "";
+  const title = `⬡ morph${version}`;
+  const titleFill = "─".repeat(Math.max(1, innerWidth - visibleWidth(title) - 1));
+  const labels = ALL_PHASES.map((phase) => phase.label.toLowerCase());
+  const widths = labels.map((label) => Math.max(label.length, 4));
+  const phaseLabelLine = labels
+    .map((label, index) => centerText(label, widths[index]))
+    .join(" » ");
+  const phaseStatusLine = ALL_PHASES
+    .map((phase, index) => centerText(renderPhaseGlyph(display, phase.id, tick, theme), widths[index]))
+    .join("   ");
+  const { done, blocked, failed, total } = summarizeTasks(display.tasks);
+  const uptime = formatUptime(display.startedAt);
+  const eta = formatEta(display);
+  const footer = buildFooterHint(display);
+  const taskSummary = total > 0
+    ? buildWorkSummary(done, total, blocked, failed)
+    : "work —";
+  const tokenRows = buildTokenRows(display);
+  const runLabel = display.profileLabel ? `${display.profileLabel} run` : "pipeline run";
+
+  return [
+    theme.fg("dim", `╭─ ${title} ${titleFill}╮`),
+    cockpitLine(
+      `${renderCockpitStatusGlyph(display, tick, theme)} ${buildCockpitStateLabel(display)} · ${runLabel} · ${display.runtimeLabel ?? "node"}`,
+      innerWidth,
+      theme,
+      "dim"
+    ),
+    cockpitLine("", innerWidth, theme),
+    cockpitLine(phaseLabelLine, innerWidth, theme, "muted"),
+    cockpitLine(phaseStatusLine, innerWidth, theme),
+    cockpitLine("", innerWidth, theme),
+    cockpitLine(`uptime ${uptime} · eta ${eta}`, innerWidth, theme, "dim"),
+    cockpitLine("", innerWidth, theme),
+    cockpitLine("TOKENS BY PHASE", innerWidth, theme, "accent"),
+    ...tokenRows.map((row) => cockpitLine(row, innerWidth, theme)),
+    cockpitLine("", innerWidth, theme),
+    cockpitLine(
+      taskSummary,
+      innerWidth,
+      theme,
+      taskSummary.includes("failed") || taskSummary.includes("blocked") ? "error" : "muted"
+    ),
+    cockpitLine(footer, innerWidth, theme, display.status === "waiting" ? "accent" : "dim"),
+    theme.fg("dim", `╰${border}╯`),
+  ];
+}
+
+function renderPhaseGlyph(display: PipelineDisplay, phaseId: string, tick: number, theme: Theme): string {
+  const status = phaseStatusForCockpit(display.phase, phaseId);
+  if (status === "done") return theme.fg("success", "✓");
+  if (status === "current" && phaseId === "work" && isWorkHalted(display)) {
+    return theme.fg("error", "!");
+  }
+  if (status === "current") return theme.fg("accent", ACTIVE_PHASE_FRAMES[tick % ACTIVE_PHASE_FRAMES.length]);
+  return theme.fg("dim", "○");
+}
+
+function phaseStatusForCockpit(
+  displayPhase: string,
+  phaseId: string
+): "done" | "current" | "pending" {
+  const currentIdx = PHASE_ORDER.indexOf(displayPhase as any);
+  const idx = PHASE_ORDER.indexOf(phaseId as any);
+  if (idx < 0 || currentIdx < 0) return "pending";
+  if (idx < currentIdx) return "done";
+  if (idx === currentIdx) return "current";
+  return "pending";
+}
+
+function buildTokenRows(display: PipelineDisplay): string[] {
+  const ledger = display.tokenLedger;
+  return [
+    formatTokenPair("spark", ledger.spark, "plan", ledger.plan),
+    formatTokenPair("work", ledger.work, "review", ledger.review),
+    formatTokenPair("ship", ledger.ship, "total", ledger.total),
+  ];
+}
+
+function formatTokenPair(leftLabel: string, leftValue: number, rightLabel: string, rightValue: number): string {
+  return `${pad(leftLabel, 6)} ${padLeft(formatDisplayTokens(leftValue), 7)}  ${pad(rightLabel, 7)} ${padLeft(formatDisplayTokens(rightValue), 7)}`;
+}
+
+function summarizeTasks(tasks: TaskDisplay[]): { done: number; blocked: number; failed: number; total: number } {
+  return {
+    done: tasks.filter((task) => task.status === "done").length,
+    blocked: tasks.filter((task) => task.status === "blocked").length,
+    failed: tasks.filter((task) => task.status === "failed").length,
+    total: tasks.length,
+  };
+}
+
+function formatUptime(startedAt?: string): string {
+  if (!startedAt) return "--:--:--";
+  const startMs = Date.parse(startedAt);
+  if (!Number.isFinite(startMs)) return "--:--:--";
+  const elapsed = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+  const hours = Math.floor(elapsed / 3600);
+  const minutes = Math.floor((elapsed % 3600) / 60);
+  const seconds = elapsed % 60;
+  return `${padLeft(String(hours), 2, "0")}:${padLeft(String(minutes), 2, "0")}:${padLeft(String(seconds), 2, "0")}`;
+}
+
+function formatEta(display: PipelineDisplay): string {
+  if (display.phase !== "work" || !display.startedAt) return "--";
+  const { done, total } = summarizeTasks(display.tasks);
+  if (done <= 0 || done >= total || total <= 0) return "--";
+  const startMs = Date.parse(display.startedAt);
+  if (!Number.isFinite(startMs)) return "--";
+  const elapsedMs = Math.max(0, Date.now() - startMs);
+  if (elapsedMs <= 0) return "--";
+  const remainingMs = Math.round((elapsedMs / done) * (total - done));
+  return `~${formatDurationShort(remainingMs)}`;
+}
+
+function formatDurationShort(durationMs: number): string {
+  const totalMinutes = Math.max(1, Math.round(durationMs / 60000));
+  if (totalMinutes < 60) return `${totalMinutes}m`;
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+function buildWorkSummary(done: number, total: number, blocked: number, failed: number): string {
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  return `work ${done}/${total} · ${pct}%${failed > 0 ? ` · fail ${failed}` : ""}${blocked > 0 ? ` · block ${blocked}` : ""}`;
+}
+
+function cockpitLine(
+  content: string,
+  innerWidth: number,
+  theme: Theme,
+  color: "accent" | "muted" | "dim" | "error" = "muted"
+): string {
+  const paddedInnerWidth = Math.max(0, innerWidth - 2);
+  const safeContent = truncateToWidth(content, paddedInnerWidth);
+  const padWidth = Math.max(0, paddedInnerWidth - visibleWidth(safeContent));
+  return `${theme.fg("dim", "│")} ${theme.fg(color, safeContent)}${" ".repeat(padWidth)} ${theme.fg("dim", "│")}`;
+}
+
+function centerText(content: string, width: number): string {
+  const visible = visibleWidth(content);
+  const totalPadding = Math.max(0, width - visible);
+  const left = Math.floor(totalPadding / 2);
+  const right = totalPadding - left;
+  return `${" ".repeat(left)}${content}${" ".repeat(right)}`;
+}
+
+function padLeft(value: string, width: number, fill: string = " "): string {
+  return value.length >= width ? value : fill.repeat(width - value.length) + value;
+}
+
+function buildCockpitStateLabel(display: PipelineDisplay): string {
+  if (isWorkHalted(display)) return "halted";
+  switch (display.status) {
+    case "busy":
+      return "active";
+    case "waiting":
+      return "waiting";
+    case "ready":
+    default:
+      return "ready";
+  }
+}
+
+function renderCockpitStatusGlyph(display: PipelineDisplay, tick: number, theme: Theme): string {
+  if (isWorkHalted(display)) return theme.fg("error", "!");
+  switch (display.status) {
+    case "busy":
+      return theme.fg("accent", ACTIVE_PHASE_FRAMES[tick % ACTIVE_PHASE_FRAMES.length]);
+    case "waiting":
+      return theme.fg("error", "◉");
+    case "ready":
+    default:
+      return theme.fg("success", "●");
+  }
+}
+
+function isWorkHalted(display: PipelineDisplay): boolean {
+  return (
+    display.phase === "work" &&
+    !display.tasks.some((task) => task.status === "running") &&
+    display.tasks.some((task) => task.status === "failed" || task.status === "blocked")
+  );
+}
+
 function buildFooterHint(display: PipelineDisplay): string {
   if (display.footerHint) return display.footerHint;
-  if (display.status === "waiting") return "approval needed  |  respond in Pi";
-  if (display.status === "busy") return "working...  |  /morph:status";
+  if (display.status === "waiting") return "awaiting approval · respond in Pi";
+  if (display.status === "busy") return "working · /morph:status";
+  if (
+    display.phase === "work" &&
+    display.tasks.some((task) => task.status === "failed" || task.status === "blocked") &&
+    !display.tasks.some((task) => task.status === "running")
+  ) {
+    return "work halted · /morph:recover";
+  }
   if (
     display.phase === "work" &&
     display.tasks.some((task) => task.status === "pending") &&
     !display.tasks.some((task) => task.status === "running") &&
     !(display.subagentActivities?.some((sub) => sub.status === "running") ?? false)
   ) {
-    return "work idle  |  /morph:recover  |  /morph:status";
-  }
-  if (
-    display.phase === "work" &&
-    display.tasks.some((task) => task.status === "failed" || task.status === "blocked") &&
-    !display.tasks.some((task) => task.status === "running")
-  ) {
-    return "work halted  |  /morph:recover  |  /morph:status";
+    return "work idle · /morph:recover";
   }
 
   switch (display.phase) {
     case "spark":
-      return "next -> plan gate";
+      return "next: plan gate";
     case "plan":
-      return "next -> approve work spec";
+      return "next: approve work spec";
     case "work":
-      return "next -> review gate";
+      return "next: review gate";
     case "review":
-      return "next -> review verdict";
+      return "next: review verdict";
     case "ship":
-      return "next -> release handoff";
+      return "next: release handoff";
     default:
-      return "/morph:run  |  /morph:status";
+      return "/morph:run · /morph:status";
   }
 }
 

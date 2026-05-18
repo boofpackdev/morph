@@ -423,32 +423,7 @@ function createEmptyReviewTelemetry(): ReviewTelemetry {
   };
 }
 
-function extractLooseSection(text: string, marker: string): string {
-  const regex = new RegExp(
-    `(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}[\\s\\S]*?(?=(?:###|##)\\s*(?:\\d+\\.\\s*)?|$)`,
-    "i"
-  );
-  const match = text.match(regex);
-  return match
-    ? match[0]
-        .replace(new RegExp(`^(?:###|##)\\s*(?:\\d+\\.\\s*)?${marker}\\s*`, "i"), "")
-        .trim()
-    : "";
-}
-
-function countListItems(text: string): number {
-  return text
-    .split("\n")
-    .filter((line) => /^\s*[-*]\s+/.test(line.trim()))
-    .length;
-}
-
-function firstMeaningfulLine(text: string): string | undefined {
-  return text
-    .split("\n")
-    .map((line) => line.replace(/^\s*[-*]\s*/, "").trim())
-    .find((line) => line.length > 0);
-}
+import { extractLooseSection, countListItems, firstMeaningfulLine } from "../utils/markdown-parsing.js";
 
 function parseReviewOutput(
   techLeadText: string,

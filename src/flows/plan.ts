@@ -43,7 +43,7 @@ export async function executePlanFlow(
   const planSkillProfiles = ["planning-and-task-breakdown"] as const;
   const planSkillBlock = renderSkillProfiles([...planSkillProfiles]);
 
-  // ── Build the PRD context ──
+  // ── Build the PRD context once (cached, not rebuilt per repair call) ──
   const prdContext = buildPrdContext(sparkOutput);
   blackboard.setPlanTelemetry({
     stage: "drafting",
@@ -190,23 +190,29 @@ ${planSkillBlock}`;
 
   const planText = architectOutput;
 
-  const qaOutput = blackboard.getFlowCheckpoint("plan", "qa") || (await runAgent(qaExpert, {
-    cwd,
-    task: `Architecture plan:\n${planText}\n\nReview for testability and QA strategy.`,
-    systemPrompt: qaSystemPrompt,
-    signal,
-    blackboard,
-    onEvent: (event) => onAgentEvent?.(qaExpert.name, qaExpert.role, "-", event),
-  })).output || "";
-
-  const effOutput = blackboard.getFlowCheckpoint("plan", "efficiency") || (await runAgent(efficiencyMgr, {
-    cwd,
-    task: `Architecture plan:\n${planText}\n\nAnalyze for efficiency and optimization.`,
-    systemPrompt: efficiencySystemPrompt,
-    signal,
-    blackboard,
-    onEvent: (event) => onAgentEvent?.(efficiencyMgr.name, efficiencyMgr.role, "-", event),
-  })).output || "";
+  // QA Expert and Efficiency Manager run in parallel (Promise.all)
+  const [qaOutput, effOutput] = await Promise.all([
+    blackboard.getFlowCheckpoint("plan", "qa")
+      ? Promise.resolve(blackboard.getFlowCheckpoint("plan", "qa")!)
+      : runAgent(qaExpert, {
+          cwd,
+          task: `Architecture plan:\n${planText}\n\nReview for testability and QA strategy.`,
+          systemPrompt: qaSystemPrompt,
+          signal,
+          blackboard,
+          onEvent: (event) => onAgentEvent?.(qaExpert.name, qaExpert.role, "-", event),
+        }).then(r => r.output || ""),
+    blackboard.getFlowCheckpoint("plan", "efficiency")
+      ? Promise.resolve(blackboard.getFlowCheckpoint("plan", "efficiency")!)
+      : runAgent(efficiencyMgr, {
+          cwd,
+          task: `Architecture plan:\n${planText}\n\nAnalyze for efficiency and optimization.`,
+          systemPrompt: efficiencySystemPrompt,
+          signal,
+          blackboard,
+          onEvent: (event) => onAgentEvent?.(efficiencyMgr.name, efficiencyMgr.role, "-", event),
+        }).then(r => r.output || ""),
+  ]);
   if (!blackboard.getFlowCheckpoint("plan", "qa")) {
     blackboard.addTokens("plan", estimateTokens(qaOutput));
     blackboard.setFlowCheckpoint("plan", "qa", qaOutput);
@@ -342,7 +348,13 @@ Hard requirements:
 - Include a concrete JSON task array inside the TASKS (DAG) section.
 - Tasks must be implementation-sized and specific to the PRD.
 - Every task needs id, description, category, dependsOn, acceptanceCriteria, estimatedComplexity, files, and targetDir.
-- Do not use generic placeholders like "Implement the core feature" or "Feature works as specified".`;
+- Do not use generic placeholders like "Implement the core feature" or "Feature works as specified".
+
+CRITICAL — JSON format requirements (combined quality + JSON repair in one call):
+- The TASKS (DAG) section MUST contain a valid JSON array inside a \`\`\`json code fence.
+- Every task object must include all required fields: id, description, category, dependsOn, acceptanceCriteria, estimatedComplexity, files, targetDir.
+- Use proper JSON syntax: double-quoted keys and string values, no trailing commas, no comments.
+- The JSON must be parseable by a standard JSON parser.`;
 
     finalOutput = (await runAgent(architect, {
       cwd,
@@ -363,9 +375,11 @@ Hard requirements:
     planIssues = assessPlanQuality(planOutput);
   }
 
-  const richPlanSource = hasRichPlanNeedingTaskRepair(finalOutput)
+  // After the combined quality+JSON repair above, skip the separate DAG extraction
+  // call if plan quality issues are already resolved.
+  const richPlanSource = (hasRichPlanNeedingTaskRepair(finalOutput) && planIssues.length > 0)
     ? finalOutput
-    : hasRichPlanNeedingTaskRepair(architectOutput)
+    : (hasRichPlanNeedingTaskRepair(architectOutput) && planIssues.length > 0)
       ? architectOutput
       : undefined;
 
@@ -458,6 +472,21 @@ ${richPlanSource}`,
     throw new Error(`Plan synthesis produced an unusable fallback plan: ${planIssues.join("; ")}`);
   }
 
+  // ── Skinny DAG repair prompt — only the task JSON is needed, not full synthesis context ──
+  const dagRepairSystemPrompt = `You are a **DAG Repair Specialist**.
+
+## Your Role
+You fix invalid task dependency graphs. Given a list of tasks and a cycle error,
+return a corrected task array with valid, acyclic dependencies.
+
+## Instructions
+- Return ONLY one valid JSON code block containing the corrected task array.
+- Preserve the same concrete work items wherever possible.
+- Every dependency must reference an existing task ID.
+- IDs must be unique.
+- The graph must be acyclic.
+- Do not include prose, markdown headings, or explanations outside the JSON code block.`;
+
   // Validate DAG
   try {
     const sorted = topologicalSort(planOutput.tasks);
@@ -492,7 +521,7 @@ Current tasks:
 \`\`\`json
 ${JSON.stringify(planOutput.tasks, null, 2)}
 \`\`\``,
-      systemPrompt: synthesisSystemPrompt,
+      systemPrompt: dagRepairSystemPrompt,
       signal,
       blackboard,
       onEvent: (event) => onAgentEvent?.(architect.name, architect.role, "-", event),
@@ -1090,27 +1119,7 @@ function createEmptyPlanTelemetry(): PlanTelemetry {
   };
 }
 
-function extractLooseSection(text: string, marker: string): string {
-  const regex = new RegExp(
-    `(?:###|##)\\s*${marker}[\\s\\S]*?(?=(?:###|##)\\s|$)`,
-    "i"
-  );
-  const match = text.match(regex);
-  return match ? match[0].replace(new RegExp(`^(?:###|##)\\s*${marker}\\s*`, "i"), "").trim() : "";
-}
-
-function countListItems(text: string): number {
-  return text
-    .split("\n")
-    .filter((line) => /^\s*(?:[-*]|\d+[.)])\s+/.test(line.trim())).length;
-}
-
-function firstMeaningfulLine(text: string): string | undefined {
-  return text
-    .split("\n")
-    .map((line) => line.replace(/^\s*(?:[-*]|\d+[.)])\s*/, "").trim())
-    .find((line) => line.length > 0 && !/^none\b/i.test(line));
-}
+import { extractLooseSection, countListItems, firstMeaningfulLine } from "../utils/markdown-parsing.js";
 
 function countTaskLikeRows(text: string): number {
   const parsed = tryExtractJsonTasks(text);

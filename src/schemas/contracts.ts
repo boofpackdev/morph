@@ -12,8 +12,8 @@ export const TaskNodeSchema = z.object({
   id: z.string().describe("Unique task identifier, e.g. 'DB-01'"),
   description: z.string().describe("What this task does"),
   category: z
-    .enum(["db", "api", "ui", "config", "test", "docs", "infra", "other"])
-    .describe("Task category for routing to the right agent"),
+    .string()
+    .describe("Known: db | api | ui | config | test | docs | infra | other"),
   dependsOn: z
     .array(z.string())
     .default([])
@@ -22,8 +22,8 @@ export const TaskNodeSchema = z.object({
     .string()
     .describe("How to verify this task is done"),
   estimatedComplexity: z
-    .enum(["low", "medium", "high"])
-    .describe("Rough complexity estimate"),
+    .string()
+    .describe("Known: low | medium | high"),
   files: z
     .array(z.string())
     .optional()
@@ -145,7 +145,7 @@ export const PlanTelemetrySchema = z.object({
     .object({
       tasks: z.number().int().nonnegative().optional(),
       waves: z.number().int().nonnegative().optional(),
-      estimatedEffort: z.enum(["hours", "days", "weeks"]).optional(),
+      estimatedEffort: z.string().describe("Known: hours | days | weeks").optional(),
     })
     .default({}),
   fileOverlaps: z
@@ -154,7 +154,7 @@ export const PlanTelemetrySchema = z.object({
         file: z.string(),
         taskIds: z.array(z.string()),
         waveNumbers: z.array(z.number().int().positive()),
-        severity: z.enum(["high", "medium"]),
+        severity: z.string().describe("Known: high | medium"),
         suggestion: z.string(),
       })
     )
@@ -182,26 +182,20 @@ export type PlanTelemetry = z.infer<typeof PlanTelemetrySchema>;
 // ── Work Task Result ──
 export const WorkTaskResultSchema = z.object({
   taskId: z.string(),
-  status: z.enum(["done", "blocked", "failed"]),
+  status: z.string().describe("Known: done | blocked | failed"),
   filesChanged: z.array(z.string()).default([]),
   diff: z.string().optional().describe("Git patch of changes"),
   summary: z.string().describe("What was done and why"),
   testsPassed: z.boolean().optional(),
+  buildPassed: z.boolean().optional(),
+  lintPassed: z.boolean().optional(),
+  typeCheckPassed: z.boolean().optional(),
+  recoveredFromReview: z.boolean().optional(),
   notes: z.string().optional(),
   attemptCount: z.number().int().min(1).optional(),
   failureKind: z
-    .enum([
-      "NO_EFFECT",
-      "TOOL_FAILURE",
-      "CLI_LAUNCH_FAILURE",
-      "AUTH_OR_QUOTA_FAILURE",
-      "REVIEW_REJECTED",
-      "REVIEW_FORMAT_INVALID",
-      "VERIFICATION_FAILED",
-      "TASK_UNDERSPECIFIED",
-      "DEPENDENCY_BLOCKED",
-      "STATE_INCONSISTENT",
-    ])
+    .string()
+    .describe("Known: NO_EFFECT | TOOL_FAILURE | CLI_LAUNCH_FAILURE | AUTH_OR_QUOTA_FAILURE | REVIEW_REJECTED | REVIEW_FORMAT_INVALID | VERIFICATION_FAILED | TASK_UNDERSPECIFIED | DEPENDENCY_BLOCKED | STATE_INCONSISTENT")
     .optional(),
   failureEvidence: z.array(z.string()).default([]),
   verification: z
@@ -237,7 +231,7 @@ export const ReviewOutputSchema = z.object({
       z.object({
         taskId: z.string().optional(),
         description: z.string(),
-        severity: z.enum(["critical", "major", "minor", "nice-to-have"]),
+        severity: z.string().describe("Known: critical | major | minor | nice-to-have"),
       })
     )
     .default([])
@@ -279,7 +273,7 @@ export const ReviewTelemetrySchema = z.object({
     .default({}),
   synthesis: z
     .object({
-      verdict: z.enum(["APPROVED", "REJECTED", "FIX_REQUESTED"]).optional(),
+      verdict: z.string().describe("Known: APPROVED | REJECTED | FIX_REQUESTED").optional(),
       score: z.number().min(1).max(10).optional(),
       requiredChanges: z.number().int().nonnegative().optional(),
       securityIssues: z.number().int().nonnegative().optional(),
@@ -300,7 +294,7 @@ export type ReviewTelemetry = z.infer<typeof ReviewTelemetrySchema>;
 
 // ── Ship Output (Approved Code → Released) ──
 export const ShipOutputSchema = z.object({
-  status: z.enum(["SHIPPED", "ABORTED", "ROLLED_BACK"]),
+  status: z.string().describe("Known: SHIPPED | ABORTED | ROLLED_BACK"),
   version: z.string().describe("Release version/tag"),
   changelog: z.string().describe("Human-readable changelog"),
   deploymentChecklist: z
@@ -313,6 +307,8 @@ export const ShipOutputSchema = z.object({
 export type ShipOutput = z.infer<typeof ShipOutputSchema>;
 
 // ── Morph State (Blackboard) ──
+// Intentionally strict — phase values are core state machine invariants.
+// New phases require explicit migration.
 export const MorphPhaseSchema = z.enum([
   "idle",
   "spark",
@@ -331,6 +327,7 @@ export const MorphStateSchema = z.object({
     .object({
       provider: z.string().optional(),
       model: z.string().optional(),
+      source: z.string().describe("Known: inherited | manual").optional(),
     })
     .default({}),
   startedAt: z.string().optional(),

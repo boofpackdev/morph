@@ -22,6 +22,13 @@ import {
   calculateCost,
 } from "../core/tokenizer.js";
 
+function redactSecrets(text: string): string {
+  return text
+    .replace(/sk-[a-zA-Z0-9]{20,}/g, "[REDACTED]")
+    .replace(/AIza[0-9A-Za-z\-_]{35}/g, "[REDACTED]")
+    .replace(/(?:api[_-]?key|apikey|secret|token|password|auth)\s*[:=]\s*\S+/gi, "[REDACTED]");
+}
+
 // ── Types ──
 
 export interface AgentConfig {
@@ -496,11 +503,11 @@ export async function runAgent(
         ?.content.trim();
       const diagnosticLines = [
         `Agent process failed (exit code ${exitCode}) via ${invocation.source}.`,
-        `Stderr: ${result.stderr.trim() || "No error output"}`,
+        `Stderr: ${redactSecrets(result.stderr).trim() || "No error output"}`,
         result.errorMessage ? `Agent error: ${result.errorMessage}` : "",
         latestAssistantMessage ? `Last assistant message: ${latestAssistantMessage.slice(0, 500)}` : "",
         nonJsonStdoutLines.length > 0
-          ? `Recent stdout: ${nonJsonStdoutLines.join(" | ").slice(0, 500)}`
+          ? `Recent stdout: ${redactSecrets(nonJsonStdoutLines.join(" | ")).slice(0, 500)}`
           : "",
       ].filter(Boolean);
       throw new Error(
