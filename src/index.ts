@@ -1616,14 +1616,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       }
     }
 
-    if (recovery.kind === "stale") {
-      bb.transition("idle");
-      state = bb.getState();
-      recovery = summarizeRecoveryState(state);
-      ctx.ui.notify("morph cleared an empty stale flow marker in this folder. Ready for a new run.", "info");
-    } else if (recovery.kind === "recoverable") {
+    const emitRecoverableNotice = () => {
       ctx.ui.notify(
-        `${recovery.message} — /morph:recover to resume`,
+        `${recovery.message} -- /morph:recover to resume`,
         recovery.failedTasks > 0 || recovery.blockedTasks > 0 ? "warning" : "info"
       );
       pi.sendMessage({
@@ -1646,8 +1641,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         display: true,
         details: { phase: "recovery-detected" },
       });
-    } else if (recovery.kind === "restartable") {
-      ctx.ui.notify(`${recovery.message} — /morph:run to continue`, "info");
+    };
+
+    const emitRestartableNotice = () => {
+      ctx.ui.notify(`${recovery.message} -- /morph:run to continue`, "info");
       pi.sendMessage({
         customType: "morph",
         content: [
@@ -1663,6 +1660,13 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         display: true,
         details: { phase: "restartable-detected" },
       });
+    };
+
+    if (recovery.kind === "stale") {
+      bb.transition("idle");
+      state = bb.getState();
+      recovery = summarizeRecoveryState(state);
+      ctx.ui.notify("morph cleared an empty stale flow marker in this folder. Ready for a new run.", "info");
     } else if (state.phase === "done") {
       ctx.ui.notify("morph — completed flow found in this folder. /morph:status for details or /morph:reset to start over.", "info");
     } else {
@@ -1700,9 +1704,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       if (resumeNow) {
         const diagnosis = diagnoseRecoveryState(state);
         state = prepareExplicitWorkRecovery(bb, state, diagnosis);
-        ctx.ui.notify("Resuming unfinished morph flow...", "info");
+        ctx.ui.notify("Recovered unfinished morph flow; resuming now...", "info");
         await runMorphPipeline("", ctx as any);
       } else {
+        emitRecoverableNotice();
         ctx.ui.notify("Recovery paused. Use /morph:recover when you are ready.", "info");
       }
     } else if (recovery.kind === "restartable") {
@@ -1714,6 +1719,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         ctx.ui.notify("Continuing unfinished morph setup...", "info");
         await runMorphPipeline("", ctx as any);
       } else {
+        emitRestartableNotice();
         ctx.ui.notify("Continuation paused. Use /morph:run when you are ready.", "info");
       }
     }
