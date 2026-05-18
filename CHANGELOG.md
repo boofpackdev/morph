@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.7.6 - Recover the real branch
+
+### Added
+- Automatic serialization for same-wave tasks that target the same concrete file
+- Explicit `AUTH_OR_QUOTA_FAILURE` classification for provider-credit and API-key failures
+- Agent-launch diagnostics that identify whether Morph used the current pi CLI, a known install, or PATH fallback
+
+### Changed
+- Live file activity is now scoped to each task's declared file targets when available
+- Resumed work reports the original DAG wave number instead of restarting labels at wave 1
+- Worktree collision displays mark unexpected task/file combinations more clearly
+
+### Fixed
+- Recovery now follows dependency-blocked children back to the real failed ancestor
+- Auto-recovery clears stale blocked descendants when retrying a failed root task
+- Busy WORK no longer presents itself as idle just because no agent event is visible for a moment
+- Quota/auth failures no longer burn through routine auto-retry loops as if they were transient tool glitches
+- Work task results are persisted exactly once, avoiding duplicate bookkeeping during execution
+- Git helper paths no longer emit noisy “not a git repository” failures when the target folder has no repo
+- Work failure cleanup now clears stale live-agent/file activity instead of leaving the board dirty
+
 ## 0.7.5 - Exorcise `nul`
 
 ### Changed

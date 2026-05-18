@@ -113,6 +113,11 @@ export interface FileTargetOverlap {
   suggestion: string;
 }
 
+export interface FileTargetOverlapRepair {
+  file: string;
+  serializedTaskIds: string[];
+}
+
 export function detectFileTargetOverlaps(tasks: TaskNode[]): FileTargetOverlap[] {
   const waves = waveGroups(tasks);
   const waveByTaskId = new Map<string, number>();
@@ -147,6 +152,39 @@ export function detectFileTargetOverlaps(tasks: TaskNode[]): FileTargetOverlap[]
       };
     })
     .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+export function serializeHighSeverityFileOverlaps(tasks: TaskNode[]): {
+  tasks: TaskNode[];
+  repairs: FileTargetOverlapRepair[];
+} {
+  const mutable = tasks.map((task) => ({ ...task, dependsOn: [...task.dependsOn] }));
+  const taskById = new Map(mutable.map((task) => [task.id, task]));
+  const repairs: FileTargetOverlapRepair[] = [];
+
+  for (const overlap of detectFileTargetOverlaps(mutable).filter((item) => item.severity === "high")) {
+    const orderedIds = overlap.taskIds
+      .map((id) => taskById.get(id))
+      .filter((task): task is TaskNode => Boolean(task))
+      .sort((a, b) => tasks.findIndex((task) => task.id === a.id) - tasks.findIndex((task) => task.id === b.id))
+      .map((task) => task.id);
+
+    for (let index = 1; index < orderedIds.length; index++) {
+      const current = taskById.get(orderedIds[index])!;
+      const previousId = orderedIds[index - 1];
+      if (!current.dependsOn.includes(previousId)) {
+        current.dependsOn.push(previousId);
+      }
+    }
+
+    repairs.push({
+      file: overlap.file,
+      serializedTaskIds: orderedIds,
+    });
+  }
+
+  topologicalSort(mutable);
+  return { tasks: mutable, repairs };
 }
 
 function normalizeExpectedFileTarget(targetDir: string | undefined, file: string): string {

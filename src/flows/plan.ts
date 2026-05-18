@@ -15,7 +15,7 @@ import {
   PLAN_AGENTS,
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
-import { detectFileTargetOverlaps, formatDAG, topologicalSort, waveGroups } from "../core/engine.js";
+import { detectFileTargetOverlaps, formatDAG, serializeHighSeverityFileOverlaps, topologicalSort, waveGroups } from "../core/engine.js";
 import { listSkillProfileLabels, renderSkillProfiles } from "../core/skill-profiles.js";
 import { TaskNodeSchema, type PlanOutput, type PlanTelemetry, type TaskNode } from "../schemas/contracts.js";
 import * as fs from "node:fs";
@@ -53,6 +53,7 @@ export async function executePlanFlow(
     finalPlan: {},
     watchlist: [],
     fileOverlaps: [],
+    fileOverlapRepairs: [],
     nextStep: "draft first plan",
   });
 
@@ -125,6 +126,7 @@ ${planSkillBlock}`;
     finalPlan: {},
     watchlist: [],
     fileOverlaps: [],
+    fileOverlapRepairs: [],
     nextStep: "specialist review",
   });
 
@@ -529,6 +531,21 @@ ${JSON.stringify(planOutput.tasks, null, 2)}
     "Phase-scoped planning doctrine"
   );
 
+  const overlapRepair = serializeHighSeverityFileOverlaps(planOutput.tasks);
+  if (overlapRepair.repairs.length > 0) {
+    planOutput = {
+      ...planOutput,
+      tasks: overlapRepair.tasks,
+    };
+    blackboard.recordDecision(
+      "plan",
+      `Serialized ${overlapRepair.repairs.length} same-wave file overlap${overlapRepair.repairs.length === 1 ? "" : "s"}`,
+      overlapRepair.repairs
+        .map((repair) => `${repair.file}: ${repair.serializedTaskIds.join(" -> ")}`)
+        .join("; ")
+    );
+  }
+
   blackboard.setPlanOutput(planOutput);
   const fileOverlaps = detectFileTargetOverlaps(planOutput.tasks);
   blackboard.setPlanTelemetry({
@@ -542,6 +559,7 @@ ${JSON.stringify(planOutput.tasks, null, 2)}
     recovery: undefined,
     watchlist: planOutput.riskMitigations.slice(0, 2),
     fileOverlaps,
+    fileOverlapRepairs: overlapRepair.repairs,
     nextStep: "approve work spec",
   });
 
@@ -1067,6 +1085,7 @@ function createEmptyPlanTelemetry(): PlanTelemetry {
     finalPlan: {},
     watchlist: [],
     fileOverlaps: [],
+    fileOverlapRepairs: [],
     nextStep: "draft first plan",
   };
 }

@@ -168,7 +168,6 @@ export async function executeWorkFlow(
 
       for (const result of batchResults) {
         allResults.push(result);
-        blackboard.addWorkResult(result);
         processedIds.add(result.taskId);
         if (result.status === "done") {
           completedIds.add(result.taskId);
@@ -202,16 +201,18 @@ function commitScaffoldResults(task: TaskNode, cwd: string): void {
   if (!isScaffold) return;
 
   try {
-    const repoDir = findGitRoot(cwd) ?? cwd;
+    const repoDir = findGitRoot(cwd);
+    if (!repoDir) return;
 
     // Add all new/untracked files (this is what the scaffold created)
-    execSync(`git add -A`, { cwd: repoDir, timeout: 10000 });
+    execSync(`git add -A`, { cwd: repoDir, timeout: 10000, stdio: ["ignore", "pipe", "ignore"] });
 
     // Only commit if there's something staged
     const status = execSync(`git status --porcelain`, {
       cwd: repoDir,
       encoding: "utf-8",
       timeout: 5000,
+      stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     if (status) {
       execSync(`git commit -m "morph: auto-commit ${task.id} â€” ${task.description.slice(0, 60)}" --no-verify`, {
@@ -423,11 +424,15 @@ function diffWorkingTree(before: Map<string, WorktreeFileSnapshot>, after: Map<s
 
 function buildWorktreeActivity(
   taskId: string,
+  task: TaskNode,
   before: Map<string, WorktreeFileSnapshot>,
   after: Map<string, WorktreeFileSnapshot>
 ): WorktreeFileActivity[] {
   const changed = diffWorkingTree(before, after);
-  return changed.filter((file) => !isIgnoredActivityPath(file)).map((file) => {
+  return changed
+    .filter((file) => !isIgnoredActivityPath(file))
+    .filter((file) => isTaskScopedActivity(task, file))
+    .map((file) => {
     const previous = before.get(file);
     const current = after.get(file);
     const operation: WorktreeFileActivity["operation"] =
@@ -450,6 +455,11 @@ function buildWorktreeActivity(
           : undefined,
     };
   });
+}
+
+function isTaskScopedActivity(task: TaskNode, file: string): boolean {
+  if (!task.files?.length) return true;
+  return task.files.some((pattern) => matchesExpectedFilePattern(file, pattern));
 }
 
 function mergeChangedFiles(...lists: string[][]): string[] {
@@ -538,6 +548,21 @@ function parseReviewerVerdict(text: string): "APPROVED" | "CHANGES_REQUESTED" | 
   const match = /\b(APPROVED|CHANGES_REQUESTED)\b/i.exec(text);
   if (!match) return undefined;
   return match[1].toUpperCase() as "APPROVED" | "CHANGES_REQUESTED";
+}
+
+function classifyToolFailure(summary: string): NonNullable<WorkTaskResult["failureKind"]> {
+  const normalized = summary.toLowerCase();
+  if (
+    normalized.includes("not enough credits") ||
+    normalized.includes("insufficient credits") ||
+    normalized.includes("insufficient quota") ||
+    normalized.includes("quota exceeded") ||
+    normalized.includes("401 unauthorized") ||
+    normalized.includes("invalid api key")
+  ) {
+    return "AUTH_OR_QUOTA_FAILURE";
+  }
+  return "TOOL_FAILURE";
 }
 
 /**
@@ -633,7 +658,7 @@ ${reviewOutput.userPerspectiveFeedback}`;
     const reportTaskActivity = () => {
       onTaskActivity?.(
         task.id,
-        buildWorktreeActivity(task.id, treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+        buildWorktreeActivity(task.id, task, treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
       );
     };
     reportTaskActivity();
@@ -680,14 +705,36 @@ Use the \`edit\` tool for surgical changes. Use \`write\` only for new files.
 
 Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
 
-    const engResult = await runAgent(engineer, {
-      cwd,
-      task: `Implement task ${task.id}: ${task.description}\n\nAcceptance criteria: ${task.acceptanceCriteria}\n\nGet it done.`,
-      systemPrompt: engSystemPrompt,
-      signal,
-      blackboard,
-      onEvent: (event) => onAgentEvent?.(engineer.name, engineer.role, task.id, event),
-    });
+    let engResult;
+    try {
+      engResult = await runAgent(engineer, {
+        cwd,
+        task: `Implement task ${task.id}: ${task.description}\n\nAcceptance criteria: ${task.acceptanceCriteria}\n\nGet it done.`,
+        systemPrompt: engSystemPrompt,
+        signal,
+        blackboard,
+        onEvent: (event) => onAgentEvent?.(engineer.name, engineer.role, task.id, event),
+      });
+    } catch (err: any) {
+      clearInterval(activityInterval);
+      reportTaskActivity();
+      lastFailureSummary = err.message || "Engineer process failed";
+      const result: WorkTaskResult = {
+        taskId: task.id,
+        status: "failed",
+        summary: lastFailureSummary,
+        filesChanged: mergeChangedFiles(
+          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+        ),
+        attemptCount: attempt,
+        failureKind: classifyToolFailure(lastFailureSummary),
+        failureEvidence: [lastFailureSummary],
+      };
+      blackboard.addWorkResult(result);
+      onTaskComplete?.(result);
+      return result;
+    }
 
     blackboard.addTokens(
       "work",
@@ -708,9 +755,10 @@ Your code will be reviewed by a Peer Reviewer. Make it reviewable.`;
           diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
         ),
         attemptCount: attempt,
-        failureKind: "TOOL_FAILURE",
+        failureKind: classifyToolFailure(lastFailureSummary),
         failureEvidence: [lastFailureSummary],
       };
+      blackboard.addWorkResult(result);
       onTaskComplete?.(result);
       return result;
     }
@@ -740,14 +788,36 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
 - Description: ${task.description}
 - Acceptance Criteria: ${task.acceptanceCriteria}${humanReviewBlock}`;
 
-    const revResult = await runAgent(reviewer, {
-      cwd,
-      task: `Review the implementation of task ${task.id}: ${task.description}\n\nThe engineer's summary:\n${engResult.output}\n\nCheck the actual files and verify.`,
-      systemPrompt: revSystemPrompt,
-      signal,
-      blackboard,
-      onEvent: (event) => onAgentEvent?.(reviewer.name, reviewer.role, task.id, event),
-    });
+    let revResult;
+    try {
+      revResult = await runAgent(reviewer, {
+        cwd,
+        task: `Review the implementation of task ${task.id}: ${task.description}\n\nThe engineer's summary:\n${engResult.output}\n\nCheck the actual files and verify.`,
+        systemPrompt: revSystemPrompt,
+        signal,
+        blackboard,
+        onEvent: (event) => onAgentEvent?.(reviewer.name, reviewer.role, task.id, event),
+      });
+    } catch (err: any) {
+      clearInterval(activityInterval);
+      reportTaskActivity();
+      lastFailureSummary = err.message || "Peer reviewer process failed";
+      const result: WorkTaskResult = {
+        taskId: task.id,
+        status: "failed",
+        summary: lastFailureSummary,
+        filesChanged: mergeChangedFiles(
+          diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
+          diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
+        ),
+        attemptCount: attempt,
+        failureKind: classifyToolFailure(lastFailureSummary),
+        failureEvidence: [lastFailureSummary],
+      };
+      blackboard.addWorkResult(result);
+      onTaskComplete?.(result);
+      return result;
+    }
 
     blackboard.addTokens(
       "work",
@@ -793,6 +863,8 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       if (verificationFailure) {
         lastFailureSummary = verification.notes.join(" ") || "Task failed completion verification.";
         if (attempt < maxRetries) {
+          clearInterval(activityInterval);
+          reportTaskActivity();
           lastReviewFeedback = [
             reviewOutput,
             "",
@@ -811,6 +883,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
           failureEvidence: verificationFailure.evidence,
           verification,
         };
+        blackboard.addWorkResult(result);
         onTaskComplete?.(result);
         return result;
       }
@@ -825,6 +898,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         failureEvidence: [],
         verification,
       };
+      blackboard.addWorkResult(result);
       onTaskComplete?.(result);
       return result;
     }
@@ -845,6 +919,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         failureKind: "REVIEW_FORMAT_INVALID",
         failureEvidence: ["Peer reviewer omitted a valid APPROVED or CHANGES_REQUESTED verdict twice."],
       };
+      blackboard.addWorkResult(result);
       onTaskComplete?.(result);
       return result;
     }
@@ -873,6 +948,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
       failureKind: "REVIEW_REJECTED",
       failureEvidence: [reviewOutput.slice(0, 500)],
     };
+    blackboard.addWorkResult(result);
     onTaskComplete?.(result);
     return result;
   }
@@ -887,6 +963,7 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
     failureKind: "STATE_INCONSISTENT",
     failureEvidence: [lastFailureSummary || "Retry loop exhausted without producing a terminal task result."],
   };
+  blackboard.addWorkResult(result);
   onTaskComplete?.(result);
   return result;
 }

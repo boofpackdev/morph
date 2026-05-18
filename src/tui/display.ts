@@ -89,6 +89,7 @@ export interface FileActivity {
 export interface FileCollision {
   path: string;
   taskIds: string[];
+  unexpectedTaskIds?: string[];
 }
 
 export interface PhaseContext {
@@ -304,6 +305,14 @@ function buildFooterHint(display: PipelineDisplay): string {
   if (display.status === "busy") return "working...  |  /morph:status";
   if (
     display.phase === "work" &&
+    display.tasks.some((task) => task.status === "pending") &&
+    !display.tasks.some((task) => task.status === "running") &&
+    !(display.subagentActivities?.some((sub) => sub.status === "running") ?? false)
+  ) {
+    return "work idle  |  /morph:recover  |  /morph:status";
+  }
+  if (
+    display.phase === "work" &&
     display.tasks.some((task) => task.status === "failed" || task.status === "blocked") &&
     !display.tasks.some((task) => task.status === "running")
   ) {
@@ -384,17 +393,20 @@ function buildOperatorPanel(display: PipelineDisplay, theme: Theme, width: numbe
   }
 
   if (fileCollisions.length > 0) {
-    lines.push(theme.fg("dim", `â”œ${border}â”¤`));
-    lines.push(theme.fg("error", `â”‚ ${pad("FILE COLLISION", innerWidth)} â”‚`));
+    lines.push(theme.fg("dim", `├${border}┤`));
+    lines.push(theme.fg("error", `│ ${pad("FILE COLLISION", innerWidth)} │`));
     for (const collision of fileCollisions.slice(0, 2)) {
-      const row = `${collision.taskIds.join(" + ")} -> ${collision.path}`;
-      lines.push(theme.fg("error", `â”‚ ${pad(truncateToWidth(row, innerWidth), innerWidth)} â”‚`));
+      const taskLabel = collision.taskIds
+        .map((taskId) => collision.unexpectedTaskIds?.includes(taskId) ? `${taskId}!` : taskId)
+        .join(" + ");
+      const row = `${taskLabel} -> ${collision.path}`;
+      lines.push(theme.fg("error", `│ ${pad(truncateToWidth(row, innerWidth), innerWidth)} │`));
     }
   }
 
   lines.push(theme.fg("dim", `├${border}┤`));
   lines.push(theme.fg("accent", `│ ${pad(display.phaseContext.title, innerWidth)} │`));
-  const contextLineLimit = display.phaseContext.title === "PLAN INTELLIGENCE" ? 8 : 2;
+  const contextLineLimit = display.phaseContext.title === "PLAN INTELLIGENCE" ? 9 : 2;
   for (const line of display.phaseContext.lines.slice(0, contextLineLimit)) {
     lines.push(theme.fg("muted", `│ ${pad(truncateToWidth(line, innerWidth), innerWidth)} │`));
   }

@@ -219,20 +219,62 @@ export const SHIP_AGENTS: AgentConfig[] = [
 
 // ── Helpers ──
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+interface PiInvocation {
+  command: string;
+  args: string[];
+  source: "current-cli" | "known-install" | "path";
+}
+
+function isPiCliScript(scriptPath: string | undefined): scriptPath is string {
+  if (!scriptPath) return false;
+  const normalized = scriptPath.replace(/\\/g, "/").toLowerCase();
+  return normalized.endsWith("/pi-coding-agent/dist/cli.js");
+}
+
+function resolveKnownPiCliPath(): string | undefined {
+  const candidates: string[] = [];
+
+  if (process.platform === "win32" && process.env.APPDATA) {
+    candidates.push(
+      path.join(
+        process.env.APPDATA,
+        "npm",
+        "node_modules",
+        "@earendil-works",
+        "pi-coding-agent",
+        "dist",
+        "cli.js"
+      )
+    );
+  }
+
+  return candidates.find((candidate) => fs.existsSync(candidate));
+}
+
+function getPiInvocation(args: string[]): PiInvocation {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-  if (currentScript && !isBunVirtualScript && fs.existsSync(currentScript)) {
-    return { command: process.execPath, args: [currentScript, ...args] };
+  if (
+    currentScript &&
+    !isBunVirtualScript &&
+    isPiCliScript(currentScript) &&
+    fs.existsSync(currentScript)
+  ) {
+    return { command: process.execPath, args: [currentScript, ...args], source: "current-cli" };
+  }
+
+  const knownPiCli = resolveKnownPiCliPath();
+  if (knownPiCli) {
+    return { command: process.execPath, args: [knownPiCli, ...args], source: "known-install" };
   }
 
   const execName = path.basename(process.execPath).toLowerCase();
   const isGenericRuntime = /^(node|bun)(\.exe)?$/.test(execName);
   if (!isGenericRuntime) {
-    return { command: process.execPath, args };
+    return { command: process.execPath, args, source: "path" };
   }
 
-  return { command: "pi", args };
+  return { command: "pi", args, source: "path" };
 }
 
 async function writeTempFile(
@@ -441,7 +483,12 @@ export async function runAgent(
     result.exitCode = exitCode;
 
     if (exitCode !== 0) {
-      throw new Error(`Agent process failed (exit code ${exitCode}).\nStderr: ${result.stderr.trim() || "No error output"}`);
+      const invocation = getPiInvocation(args);
+      throw new Error(
+        `Agent process failed (exit code ${exitCode}) via ${invocation.source}.\nStderr: ${
+          result.stderr.trim() || "No error output"
+        }`
+      );
     }
 
     // Calculate cost

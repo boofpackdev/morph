@@ -159,6 +159,14 @@ export const PlanTelemetrySchema = z.object({
       })
     )
     .default([]),
+  fileOverlapRepairs: z
+    .array(
+      z.object({
+        file: z.string(),
+        serializedTaskIds: z.array(z.string()),
+      })
+    )
+    .default([]),
   recovery: z
     .object({
       issue: z.string(),
@@ -185,6 +193,7 @@ export const WorkTaskResultSchema = z.object({
     .enum([
       "NO_EFFECT",
       "TOOL_FAILURE",
+      "AUTH_OR_QUOTA_FAILURE",
       "REVIEW_REJECTED",
       "REVIEW_FORMAT_INVALID",
       "VERIFICATION_FAILED",

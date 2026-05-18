@@ -747,6 +747,7 @@ export default function (pi: ExtensionAPI) {
     const latestFailed = [...state.workResults]
       .reverse()
       .find((result) => result.status === "failed" || result.status === "blocked");
+    const latestRecoverableFailure = findLatestRecoverableFailure(state, latestFailed);
     const impossibleSuccess = [...state.workResults]
       .reverse()
       .find((result) => result.status === "done" && result.filesChanged.length === 0);
@@ -764,7 +765,7 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    if (!latestFailed) {
+    if (!latestRecoverableFailure) {
       return {
         evidence: ["No failed or blocked task result is currently recorded."],
         recommendation: "Resume the current phase from its saved state.",
@@ -772,73 +773,120 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    const kind = latestFailed.failureKind;
+    const kind = latestRecoverableFailure.failureKind;
     switch (kind) {
       case "NO_EFFECT":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Rerun the task with explicit completion evidence and expected file targets.",
           autoSafe: true,
         };
       case "TOOL_FAILURE":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Retry the task; the last failure came from the execution layer rather than the task itself.",
           autoSafe: true,
         };
+      case "AUTH_OR_QUOTA_FAILURE":
+        return {
+          taskId: latestRecoverableFailure.taskId,
+          failureKind: kind,
+          evidence: latestRecoverableFailure.failureEvidence,
+          recommendation: "Fix provider access or credits, or switch provider/model config, before retrying this task.",
+          autoSafe: false,
+        };
       case "REVIEW_REJECTED":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Rerun the task with reviewer feedback injected into the next attempt.",
           autoSafe: true,
         };
       case "REVIEW_FORMAT_INVALID":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Retry the review path; implementation may be fine, but the reviewer response was malformed.",
           autoSafe: true,
         };
       case "VERIFICATION_FAILED":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Rerun the task against the missing expected artifacts before trusting another approval.",
           autoSafe: true,
         };
       case "DEPENDENCY_BLOCKED":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Recover the failed dependency first; blocked children should not be retried in isolation.",
           autoSafe: false,
         };
       case "TASK_UNDERSPECIFIED":
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Replan the task before spending more implementation attempts on fog.",
           autoSafe: false,
         };
       default:
         return {
-          taskId: latestFailed.taskId,
+          taskId: latestRecoverableFailure.taskId,
           failureKind: kind,
-          evidence: latestFailed.failureEvidence,
+          evidence: latestRecoverableFailure.failureEvidence,
           recommendation: "Resume cautiously from the current phase and inspect the task if it fails again.",
           autoSafe: true,
         };
     }
+  }
+
+  function findLatestRecoverableFailure(
+    state: ReturnType<Blackboard["getState"]>,
+    latestFailed: ReturnType<Blackboard["getState"]>["workResults"][number] | undefined
+  ): ReturnType<Blackboard["getState"]>["workResults"][number] | undefined {
+    if (!latestFailed || latestFailed.failureKind !== "DEPENDENCY_BLOCKED") {
+      return latestFailed;
+    }
+
+    const tasksById = new Map(state.planOutput?.tasks.map((task) => [task.id, task]) ?? []);
+    const resultsById = new Map(state.workResults.map((result) => [result.taskId, result]));
+    const visited = new Set<string>();
+    const rootFailures: ReturnType<Blackboard["getState"]>["workResults"] = [];
+
+    const visit = (taskId: string): void => {
+      if (visited.has(taskId)) return;
+      visited.add(taskId);
+
+      const result = resultsById.get(taskId);
+      if (result && result.status === "failed") {
+        rootFailures.push(result);
+        return;
+      }
+
+      const task = tasksById.get(taskId);
+      for (const dependencyId of task?.dependsOn ?? []) {
+        visit(dependencyId);
+      }
+    };
+
+    visit(latestFailed.taskId);
+
+    if (rootFailures.length === 0) return latestFailed;
+
+    const resultOrder = new Map(state.workResults.map((result, index) => [result.taskId, index]));
+    return rootFailures.sort(
+      (a, b) => (resultOrder.get(b.taskId) ?? -1) - (resultOrder.get(a.taskId) ?? -1)
+    )[0];
   }
 
   function buildRecoveryReport(
@@ -956,7 +1004,29 @@ export default function (pi: ExtensionAPI) {
     diagnosis: ReturnType<typeof diagnoseRecoveryState>
   ): void {
     if (!diagnosis.taskId) return;
-    bb.clearWorkResults([diagnosis.taskId]);
+    const state = bb.getState();
+    const taskIdsToClear = new Set<string>([diagnosis.taskId]);
+    const tasks = state.planOutput?.tasks ?? [];
+    let changed = true;
+
+    // Any descendant that was only blocked because of the failed root must be
+    // reconsidered after the root is retried. Leaving those stale blocked
+    // results in place makes the DAG appear permanently processed even after
+    // the dependency is healthy again.
+    while (changed) {
+      changed = false;
+      for (const task of tasks) {
+        if (taskIdsToClear.has(task.id)) continue;
+        const result = state.workResults.find((candidate) => candidate.taskId === task.id);
+        const dependsOnClearedTask = task.dependsOn.some((dependencyId) => taskIdsToClear.has(dependencyId));
+        if (dependsOnClearedTask && result?.status === "blocked") {
+          taskIdsToClear.add(task.id);
+          changed = true;
+        }
+      }
+    }
+
+    bb.clearWorkResults([...taskIdsToClear]);
   }
 
   function deletePipelineState(cwd: string): void {
@@ -1134,9 +1204,17 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       (activity) => activity.status === "running" || activity.status === "idle"
     );
 
-    const visibleTasks = taskOverride ?? tasks;
+    const hasLiveAgent = liveSubs.length > 0 || state.activeAgents.length > 0;
+    const visibleTasks: TaskDisplay[] = (taskOverride ?? tasks).map((task) =>
+      !hasLiveAgent && task.status === "running"
+        ? { ...task, status: "pending" as const }
+        : task
+    );
 
-    const fileActivities = [...activeFileActivities.values(), ...recentFileActivities].slice(0, 6);
+    const visibleActiveFiles = hasLiveAgent
+      ? [...activeFileActivities.values()]
+      : [...activeFileActivities.values()].map((activity) => ({ ...activity, status: "done" as const }));
+    const fileActivities = [...visibleActiveFiles, ...recentFileActivities].slice(0, 6);
     const fileCollisions = buildFileCollisions([...activeFileActivities.values()]);
 
     return {
@@ -1206,8 +1284,27 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       .map(([path, taskIds]) => ({
         path,
         taskIds: [...taskIds].sort(),
+        unexpectedTaskIds: [...taskIds]
+          .filter((taskId) => !isExpectedTaskFile(taskId, path))
+          .sort(),
       }))
       .sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  function isExpectedTaskFile(taskId: string, filePath: string): boolean {
+    const task = getBB().getState().planOutput?.tasks.find((candidate) => candidate.id === taskId);
+    if (!task) return false;
+    return (task.files ?? []).some((pattern) => matchesTaskFilePattern(filePath, pattern));
+  }
+
+  function matchesTaskFilePattern(filePath: string, pattern: string): boolean {
+    const normalizedFile = filePath.replace(/\\/g, "/");
+    const normalizedPattern = pattern.replace(/\\/g, "/").replace(/^\.\//, "");
+    if (normalizedPattern.endsWith("/**")) {
+      const prefix = normalizedPattern.slice(0, -3).replace(/\/$/, "");
+      return normalizedFile === prefix || normalizedFile.startsWith(`${prefix}/`);
+    }
+    return normalizedFile === normalizedPattern;
   }
 
   function buildPhaseContext(
@@ -1256,6 +1353,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       case "plan":
         return buildPlanIntelligenceContext(state);
       case "work": {
+        const workIsBusy = currentStatus === "busy";
         const shownRunning = runningTasks.slice(0, 3).map(compactTask).join("   ");
         const shownPending = pendingTasks.slice(0, 3).map(compactTask).join("   ");
         const compactQueue = tasks.slice(0, 5).map((task) =>
@@ -1270,6 +1368,15 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             lastFailure ? `files ${lastFailure.filesChanged.length} changed` : "files —",
             lastFailure ? lastFailure.summary.replace(/\s+/g, " ").slice(0, 72) : "inspect task history",
             "next -> recover or inspect status",
+          ]};
+        }
+        if (!workIsBusy && runningTasks.length === 0 && pendingTasks.length > 0 && activeAgents === 0) {
+          return { title: "WORK CONTROL", lines: [
+            `done ${doneTasks.length}/${tasks.length}  ·  blocked ${blockedTasks.length}`,
+            compactQueue ? `queue  ${compactQueue}` : "queue  —",
+            shownPending ? `next   ${shownPending}` : "next   work pending",
+            "lanes  no active agent",
+            "next -> resume or recover",
           ]};
         }
         return { title: "WORK CONTROL", lines: [
@@ -1353,6 +1460,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       if (telemetry.fileOverlaps.length) {
         const first = telemetry.fileOverlaps[0];
         lines.push(`Overlap      ${first.severity.toUpperCase()} ${first.taskIds.join(" + ")} -> ${first.file}`);
+      }
+      if (telemetry.fileOverlapRepairs.length) {
+        const firstRepair = telemetry.fileOverlapRepairs[0];
+        lines.push(`Serialized   ${firstRepair.serializedTaskIds.join(" -> ")} -> ${firstRepair.file}`);
       }
       lines.push(`Next         ${telemetry.nextStep}`);
     } else {
@@ -1725,7 +1836,12 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       try {
         const { execSync } = require("node:child_process");
         execSync(`git add -A`, { cwd: ctx.cwd, timeout: 10000, stdio: "pipe" });
-        const status = execSync(`git status --porcelain`, { cwd: ctx.cwd, encoding: "utf-8", timeout: 5000 }).trim();
+        const status = execSync(`git status --porcelain`, {
+          cwd: ctx.cwd,
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["ignore", "pipe", "ignore"],
+        }).trim();
         if (status) {
           execSync(`git stash push -m "morph: pre-work checkpoint" --include-untracked`, {
             cwd: ctx.cwd, timeout: 10000, stdio: "pipe"
@@ -1754,6 +1870,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             status: "pending",
           });
         }
+        const plannedWaves = waveGroups(state.planOutput.tasks);
+        const originalWaveByTaskId = new Map<string, number>();
+        plannedWaves.forEach((wave, index) => wave.forEach((task) => originalWaveByTaskId.set(task.id, index + 1)));
 
         const results = await executeWorkFlow({
           cwd: ctx.cwd,
@@ -1765,8 +1884,11 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             // Update widget: mark wave tasks as "running"
             for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
             setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
+            const originalWaveNumber = Math.min(
+              ...wave.map((task) => originalWaveByTaskId.get(task.id) ?? waveIndex + 1)
+            );
             ctx.ui.notify(
-              `Work wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
+              `Work wave ${originalWaveNumber}/${plannedWaves.length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
               "info"
             );
             return true;
@@ -1873,12 +1995,15 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             : `Work done! ${done}/${results.length} tasks. /morph:review to audit.`,
           (incomplete ? "warning" : "success") as any
         );
-      } catch (err: any) {
-        setCurrentStatus("ready");
-        ctx.ui.setStatus("morph", `morph:work FAILED ${err.message.slice(0, 40)}`);
-        ctx.ui.setWidget("morph", undefined);
-        ctx.ui.notify(`Work failed: ${err.message}`, "error");
-      }
+        } catch (err: any) {
+          subagentActivities.clear();
+          activeFileActivities.clear();
+          bb.clearActiveAgents();
+          setCurrentStatus("ready");
+          ctx.ui.setStatus("morph", `morph:work FAILED ${err.message.slice(0, 40)}`);
+          updateWidget(ctx as any);
+          ctx.ui.notify(`Work failed: ${err.message}`, "error");
+        }
     },
   });
 
@@ -2248,6 +2373,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                   : "pending" 
               });
             }
+            const plannedWaves = waveGroups(state.planOutput!.tasks);
+            const originalWaveByTaskId = new Map<string, number>();
+            plannedWaves.forEach((wave, index) => wave.forEach((task) => originalWaveByTaskId.set(task.id, index + 1)));
 
             const results = await executeWorkFlow({
               cwd: ctx.cwd,
@@ -2266,8 +2394,11 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                   }
                 }
                 setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
+                const originalWaveNumber = Math.min(
+                  ...wave.map((task) => originalWaveByTaskId.get(task.id) ?? waveIndex + 1)
+                );
                 ctx.ui.notify(
-                  `Work wave ${waveIndex + 1}/${waveGroups(state.planOutput!.tasks).length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
+                  `Work wave ${originalWaveNumber}/${plannedWaves.length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
                   "info"
                 );
                 return true;
@@ -2380,12 +2511,16 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
               ctx.ui.notify("Pipeline paused after Work. Run /morph:run to continue.", "info");
               return;
             }
-          } catch (err: any) {
-            setCurrentStatus("ready");
-            ctx.ui.setStatus("morph", `morph:run Work failed: ${err.message.slice(0, 40)}`);
-            ctx.ui.notify(`Work failed: ${err.message}`, "error");
-            return;
-          }
+            } catch (err: any) {
+              subagentActivities.clear();
+              activeFileActivities.clear();
+              bb.clearActiveAgents();
+              setCurrentStatus("ready");
+              ctx.ui.setStatus("morph", `morph:run Work failed: ${err.message.slice(0, 40)}`);
+              updateWidget(ctx as any);
+              ctx.ui.notify(`Work failed: ${err.message}`, "error");
+              return;
+            }
         }
 
         // ── Review ──
