@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.8 - Manual recovery means retry
+
+### Fixed
+- Explicit `/morph:recover` now clears the selected failed work branch even when the failure is intentionally not auto-safe
+- Startup “Resume now” prepares work recovery before rerunning the phase instead of immediately re-halting on persisted failed results
+- Manual recovery and startup resume now share the same failed-branch reset behavior
+
+### Changed
+- Automatic recovery remains conservative, while operator-chosen recovery now behaves like an actual retry command
+
 ## 0.7.7 - Stop spinning on ghosts
 
 ### Added

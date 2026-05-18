@@ -1028,8 +1028,15 @@ export default function (pi: ExtensionAPI) {
   ): void {
     if (!diagnosis.taskId) return;
     bb.incrementRetry(diagnosis.taskId);
+    clearWorkResultBranch(bb, diagnosis.taskId);
+  }
+
+  function clearWorkResultBranch(
+    bb: Blackboard,
+    taskId: string
+  ): void {
     const state = bb.getState();
-    const taskIdsToClear = new Set<string>([diagnosis.taskId]);
+    const taskIdsToClear = new Set<string>([taskId]);
     const tasks = state.planOutput?.tasks ?? [];
     let changed = true;
 
@@ -1051,6 +1058,22 @@ export default function (pi: ExtensionAPI) {
     }
 
     bb.clearWorkResults([...taskIdsToClear]);
+  }
+
+  function prepareExplicitWorkRecovery(
+    bb: Blackboard,
+    state: ReturnType<Blackboard["getState"]>,
+    diagnosis: ReturnType<typeof diagnoseRecoveryState>
+  ): ReturnType<Blackboard["getState"]> {
+    if (
+      state.phase === "work" &&
+      diagnosis.taskId &&
+      state.workResults.some((result) => result.taskId === diagnosis.taskId && result.status !== "done")
+    ) {
+      clearWorkResultBranch(bb, diagnosis.taskId);
+      return bb.getState();
+    }
+    return state;
   }
 
   function deletePipelineState(cwd: string): void {
@@ -1675,6 +1698,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           : `${state.phase.toUpperCase()} is unfinished. Continue from the current phase now?`
       );
       if (resumeNow) {
+        const diagnosis = diagnoseRecoveryState(state);
+        state = prepareExplicitWorkRecovery(bb, state, diagnosis);
         ctx.ui.notify("Resuming unfinished morph flow...", "info");
         await runMorphPipeline("", ctx as any);
       } else {
@@ -2782,12 +2807,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         state = bb.getState();
       } else if (
         diagnosis.taskId &&
-        diagnosis.autoSafe &&
         state.phase === "work" &&
         state.workResults.some((result) => result.taskId === diagnosis.taskId && result.status !== "done")
       ) {
-        bb.clearWorkResults([diagnosis.taskId]);
-        state = bb.getState();
+        state = prepareExplicitWorkRecovery(bb, state, diagnosis);
       }
 
       const checkpointCount = Object.keys(state.flowCheckpoints[state.phase] || {}).length;
