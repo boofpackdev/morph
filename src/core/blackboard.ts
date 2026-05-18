@@ -303,6 +303,11 @@ export class Blackboard {
 
   /** Set work phase done, move to review. */
   finishWork(): void {
+    // A new review pass should not inherit the previous verdict after fixes
+    // return from WORK.
+    this.state.reviewOutput = undefined;
+    this.state.reviewTelemetry = undefined;
+    delete this.state.flowCheckpoints.review;
     this.state.phase = "review";
     this.save();
   }
@@ -316,6 +321,11 @@ export class Blackboard {
     } else {
       this.state.phase = "work"; // Loop back
     }
+    this.save();
+  }
+
+  setReviewTelemetry(output: MorphState["reviewTelemetry"]): void {
+    this.state.reviewTelemetry = output;
     this.save();
   }
 
@@ -364,6 +374,7 @@ export class Blackboard {
   resetPhase(phase: MorphPhase): void {
     if (phase === "review") {
       this.state.reviewOutput = undefined;
+      this.state.reviewTelemetry = undefined;
       delete this.state.flowCheckpoints.review;
       this.state.phase = "work";
     } else if (phase === "work") {

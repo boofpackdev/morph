@@ -248,6 +248,56 @@ export const ReviewOutputSchema = z.object({
 
 export type ReviewOutput = z.infer<typeof ReviewOutputSchema>;
 
+export const ReviewTelemetrySchema = z.object({
+  stage: z
+    .enum(["routing", "specialist-review", "synthesizing", "repairing", "ready"])
+    .default("routing"),
+  routing: z
+    .object({
+      qa: z.boolean().default(false),
+      perf: z.boolean().default(false),
+      user: z.boolean().default(false),
+    })
+    .default({}),
+  qa: z
+    .object({
+      signalsFound: z.number().int().nonnegative().optional(),
+      notableGap: z.string().optional(),
+    })
+    .default({}),
+  perf: z
+    .object({
+      signalsFound: z.number().int().nonnegative().optional(),
+      notableConcern: z.string().optional(),
+    })
+    .default({}),
+  user: z
+    .object({
+      signalsFound: z.number().int().nonnegative().optional(),
+      notableConcern: z.string().optional(),
+    })
+    .default({}),
+  synthesis: z
+    .object({
+      verdict: z.enum(["APPROVED", "REJECTED", "FIX_REQUESTED"]).optional(),
+      score: z.number().min(1).max(10).optional(),
+      requiredChanges: z.number().int().nonnegative().optional(),
+      securityIssues: z.number().int().nonnegative().optional(),
+      coverageAssessment: z.string().optional(),
+    })
+    .default({}),
+  recovery: z
+    .object({
+      issue: z.string(),
+      action: z.string(),
+    })
+    .optional(),
+  nextStep: z.string().default("route review specialists"),
+});
+
+export type ReviewTelemetry = z.infer<typeof ReviewTelemetrySchema>;
+
+
 // ── Ship Output (Approved Code → Released) ──
 export const ShipOutputSchema = z.object({
   status: z.enum(["SHIPPED", "ABORTED", "ROLLED_BACK"]),
@@ -290,6 +340,7 @@ export const MorphStateSchema = z.object({
   planTelemetry: PlanTelemetrySchema.optional(),
   workResults: z.array(WorkTaskResultSchema).default([]),
   reviewOutput: ReviewOutputSchema.optional(),
+  reviewTelemetry: ReviewTelemetrySchema.optional(),
   shipOutput: ShipOutputSchema.optional(),
   tokenLedger: z
     .object({
