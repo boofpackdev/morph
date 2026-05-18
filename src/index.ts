@@ -791,6 +791,14 @@ export default function (pi: ExtensionAPI) {
           recommendation: "Retry the task; the last failure came from the execution layer rather than the task itself.",
           autoSafe: true,
         };
+      case "CLI_LAUNCH_FAILURE":
+        return {
+          taskId: latestRecoverableFailure.taskId,
+          failureKind: kind,
+          evidence: latestRecoverableFailure.failureEvidence,
+          recommendation: "Repair the pi/Node launch path before retrying; the agent process could not be started.",
+          autoSafe: false,
+        };
       case "AUTH_OR_QUOTA_FAILURE":
         return {
           taskId: latestRecoverableFailure.taskId,
@@ -881,7 +889,22 @@ export default function (pi: ExtensionAPI) {
 
     visit(latestFailed.taskId);
 
-    if (rootFailures.length === 0) return latestFailed;
+    if (rootFailures.length === 0) {
+      const completedIds = new Set(
+        state.workResults
+          .filter((result) => result.status === "done")
+          .map((result) => result.taskId)
+      );
+      const latestBlockedTask = tasksById.get(latestFailed.taskId);
+      const dependenciesRecovered =
+        latestBlockedTask?.dependsOn.every((dependencyId) => completedIds.has(dependencyId)) ?? false;
+      if (dependenciesRecovered) {
+        return [...state.workResults]
+          .reverse()
+          .find((result) => result.status === "failed");
+      }
+      return latestFailed;
+    }
 
     const resultOrder = new Map(state.workResults.map((result, index) => [result.taskId, index]));
     return rootFailures.sort(
@@ -1004,6 +1027,7 @@ export default function (pi: ExtensionAPI) {
     diagnosis: ReturnType<typeof diagnoseRecoveryState>
   ): void {
     if (!diagnosis.taskId) return;
+    bb.incrementRetry(diagnosis.taskId);
     const state = bb.getState();
     const taskIdsToClear = new Set<string>([diagnosis.taskId]);
     const tasks = state.planOutput?.tasks ?? [];

@@ -77,7 +77,7 @@ export async function executeWorkFlow(
     throw new Error("No plan output found. Run plan flow first.");
   }
 
-  const state = blackboard.getState();
+  let state = blackboard.getState();
   const engineer = WORK_AGENTS.find((a) => a.name === "engineer")!;
   const reviewer = WORK_AGENTS.find((a) => a.name === "peer-reviewer")!;
 
@@ -88,6 +88,18 @@ export async function executeWorkFlow(
       .filter((r) => r.status === "done")
       .map((r) => r.taskId)
   );
+  const taskById = new Map(planOutput.tasks.map((task) => [task.id, task]));
+  const staleBlockedTaskIds = state.workResults
+    .filter((result) => result.status === "blocked")
+    .filter((result) => {
+      const task = taskById.get(result.taskId);
+      return task && task.dependsOn.every((dependencyId) => completedIds.has(dependencyId));
+    })
+    .map((result) => result.taskId);
+  if (staleBlockedTaskIds.length > 0) {
+    blackboard.clearWorkResults(staleBlockedTaskIds);
+    state = blackboard.getState();
+  }
   const processedIds = new Set<string>(
     state.workResults.map((r) => r.taskId)
   );
@@ -552,6 +564,9 @@ function parseReviewerVerdict(text: string): "APPROVED" | "CHANGES_REQUESTED" | 
 
 function classifyToolFailure(summary: string): NonNullable<WorkTaskResult["failureKind"]> {
   const normalized = summary.toLowerCase();
+  if (normalized.includes("spawn ") && normalized.includes(" enoent")) {
+    return "CLI_LAUNCH_FAILURE";
+  }
   if (
     normalized.includes("not enough credits") ||
     normalized.includes("insufficient credits") ||

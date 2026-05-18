@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.7.7 - Stop spinning on ghosts
+
+### Added
+- `CLI_LAUNCH_FAILURE` classification for missing runtime / process-launch failures
+- Richer child-process diagnostics with spawn errors, structured agent errors, last assistant output, and recent non-JSON stdout
+
+### Fixed
+- Stale blocked tasks are cleared once their dependencies have recovered, so resumed branches become runnable again
+- Recovery no longer fixates on a blocked leaf whose dependencies are already complete
+- Dead current-runtime paths are no longer selected for pi relaunches
+- Auto-recovery now consumes durable retry budget when it clears failed work, preventing infinite first-attempt loops
+
+### Packaging
+- Follow-up npm release so installed pi packages can receive the 0.7.x recovery fixes instead of remaining on older published builds
+
 ## 0.7.6 - Recover the real branch
 
 ### Added
