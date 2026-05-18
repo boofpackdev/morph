@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.9 - Create the room before entering it
+
+### Fixed
+- Work tasks whose `targetDir` does not exist yet now launch from the project root instead of failing before they can create the directory
+- Repo-relative task file verification now stays anchored at the project root even when agents work inside nested target directories
+- Target-directory guidance now tells agents when the directory may need to be created as part of the task
+
 ## 0.7.8 - Manual recovery means retry
 
 ### Fixed

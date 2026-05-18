@@ -625,8 +625,13 @@ async function executeSingleTask(
   onTaskActivity?: (taskId: string, activity: WorktreeFileActivity[]) => void,
   onAgentEvent?: (agentName: string, role: string, taskId: string, event: any) => void
 ): Promise<WorkTaskResult> {
-  // â”€â”€ Fix 2: Resolve project-scoped cwd â”€â”€
-  const cwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+  // Task files are planned relative to the project root, but targetDir is only
+  // a preferred working directory. Some tasks intentionally create that
+  // directory (for example `.github/workflows`), so do not make process launch
+  // depend on the directory already existing.
+  const preferredTaskCwd = task.targetDir ? path.resolve(baseCwd, task.targetDir) : baseCwd;
+  const targetDirExists = fs.existsSync(preferredTaskCwd);
+  const cwd = targetDirExists ? preferredTaskCwd : baseCwd;
   const repoRoot = findGitRoot(baseCwd);
 
   let attempt = 0;
@@ -692,7 +697,7 @@ ${reviewOutput.userPerspectiveFeedback}`;
         : "";
 
     const targetDirNote = task.targetDir
-      ? `\n\n## Target Directory\nAll file operations should be within \`${task.targetDir}\` relative to the project root.`
+      ? `\n\n## Target Directory\nAll file operations should be within \`${task.targetDir}\` relative to the project root.${targetDirExists ? "" : " This directory does not exist yet; create it if needed for the task."}`
       : "";
 
     const engSystemPrompt = `You are the **Primary Engineer** for the morph orchestration pipeline.
@@ -873,7 +878,10 @@ Keep feedback actionable and specific. Reference exact file paths and line numbe
         diffChangedFiles(filesBeforeAttempt, snapshotChangedFiles(repoRoot)),
         diffWorkingTree(treeBeforeAttempt, snapshotWorkingTree(repoRoot, baseCwd))
       );
-      const verification = buildVerification(task, cwd, changedFiles);
+      // Planned file targets are repo-relative, not cwd-relative. Keep
+      // verification anchored at the project root even when the agent worked
+      // inside a nested targetDir.
+      const verification = buildVerification(task, baseCwd, changedFiles);
       const verificationFailure = classifyVerificationFailure(task, verification);
       if (verificationFailure) {
         lastFailureSummary = verification.notes.join(" ") || "Task failed completion verification.";
