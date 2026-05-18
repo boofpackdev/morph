@@ -254,9 +254,11 @@ function resolveKnownPiCliPath(): string | undefined {
 function getPiInvocation(args: string[]): PiInvocation {
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
+  const currentRuntimeExists = fs.existsSync(process.execPath);
   if (
     currentScript &&
     !isBunVirtualScript &&
+    currentRuntimeExists &&
     isPiCliScript(currentScript) &&
     fs.existsSync(currentScript)
   ) {
@@ -264,7 +266,7 @@ function getPiInvocation(args: string[]): PiInvocation {
   }
 
   const knownPiCli = resolveKnownPiCliPath();
-  if (knownPiCli) {
+  if (knownPiCli && currentRuntimeExists) {
     return { command: process.execPath, args: [knownPiCli, ...args], source: "known-install" };
   }
 
@@ -379,6 +381,7 @@ export async function runAgent(
     }
 
     let wasAborted = false;
+    const nonJsonStdoutLines: string[] = [];
 
     const exitCode = await new Promise<number>((resolve) => {
       const invocation = getPiInvocation(args);
@@ -396,6 +399,8 @@ export async function runAgent(
         try {
           event = JSON.parse(line);
         } catch {
+          nonJsonStdoutLines.push(line.trim());
+          nonJsonStdoutLines.splice(0, Math.max(0, nonJsonStdoutLines.length - 5));
           return;
         }
 
@@ -462,8 +467,9 @@ export async function runAgent(
         resolve(code ?? 0);
       });
 
-      proc.on("error", () => {
+      proc.on("error", (err) => {
         clearTimeout(timeout);
+        result.stderr += `${result.stderr ? "\n" : ""}${err.message}`;
         resolve(1);
       });
 
@@ -484,10 +490,21 @@ export async function runAgent(
 
     if (exitCode !== 0) {
       const invocation = getPiInvocation(args);
+      const latestAssistantMessage = [...result.messages]
+        .reverse()
+        .find((message) => message.role === "assistant")
+        ?.content.trim();
+      const diagnosticLines = [
+        `Agent process failed (exit code ${exitCode}) via ${invocation.source}.`,
+        `Stderr: ${result.stderr.trim() || "No error output"}`,
+        result.errorMessage ? `Agent error: ${result.errorMessage}` : "",
+        latestAssistantMessage ? `Last assistant message: ${latestAssistantMessage.slice(0, 500)}` : "",
+        nonJsonStdoutLines.length > 0
+          ? `Recent stdout: ${nonJsonStdoutLines.join(" | ").slice(0, 500)}`
+          : "",
+      ].filter(Boolean);
       throw new Error(
-        `Agent process failed (exit code ${exitCode}) via ${invocation.source}.\nStderr: ${
-          result.stderr.trim() || "No error output"
-        }`
+        diagnosticLines.join("\n")
       );
     }
 

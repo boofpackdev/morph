@@ -791,6 +791,14 @@ export default function (pi: ExtensionAPI) {
           recommendation: "Retry the task; the last failure came from the execution layer rather than the task itself.",
           autoSafe: true,
         };
+      case "CLI_LAUNCH_FAILURE":
+        return {
+          taskId: latestRecoverableFailure.taskId,
+          failureKind: kind,
+          evidence: latestRecoverableFailure.failureEvidence,
+          recommendation: "Repair the pi/Node launch path before retrying; the agent process could not be started.",
+          autoSafe: false,
+        };
       case "AUTH_OR_QUOTA_FAILURE":
         return {
           taskId: latestRecoverableFailure.taskId,
@@ -881,7 +889,22 @@ export default function (pi: ExtensionAPI) {
 
     visit(latestFailed.taskId);
 
-    if (rootFailures.length === 0) return latestFailed;
+    if (rootFailures.length === 0) {
+      const completedIds = new Set(
+        state.workResults
+          .filter((result) => result.status === "done")
+          .map((result) => result.taskId)
+      );
+      const latestBlockedTask = tasksById.get(latestFailed.taskId);
+      const dependenciesRecovered =
+        latestBlockedTask?.dependsOn.every((dependencyId) => completedIds.has(dependencyId)) ?? false;
+      if (dependenciesRecovered) {
+        return [...state.workResults]
+          .reverse()
+          .find((result) => result.status === "failed");
+      }
+      return latestFailed;
+    }
 
     const resultOrder = new Map(state.workResults.map((result, index) => [result.taskId, index]));
     return rootFailures.sort(
@@ -1004,8 +1027,16 @@ export default function (pi: ExtensionAPI) {
     diagnosis: ReturnType<typeof diagnoseRecoveryState>
   ): void {
     if (!diagnosis.taskId) return;
+    bb.incrementRetry(diagnosis.taskId);
+    clearWorkResultBranch(bb, diagnosis.taskId);
+  }
+
+  function clearWorkResultBranch(
+    bb: Blackboard,
+    taskId: string
+  ): void {
     const state = bb.getState();
-    const taskIdsToClear = new Set<string>([diagnosis.taskId]);
+    const taskIdsToClear = new Set<string>([taskId]);
     const tasks = state.planOutput?.tasks ?? [];
     let changed = true;
 
@@ -1027,6 +1058,22 @@ export default function (pi: ExtensionAPI) {
     }
 
     bb.clearWorkResults([...taskIdsToClear]);
+  }
+
+  function prepareExplicitWorkRecovery(
+    bb: Blackboard,
+    state: ReturnType<Blackboard["getState"]>,
+    diagnosis: ReturnType<typeof diagnoseRecoveryState>
+  ): ReturnType<Blackboard["getState"]> {
+    if (
+      state.phase === "work" &&
+      diagnosis.taskId &&
+      state.workResults.some((result) => result.taskId === diagnosis.taskId && result.status !== "done")
+    ) {
+      clearWorkResultBranch(bb, diagnosis.taskId);
+      return bb.getState();
+    }
+    return state;
   }
 
   function deletePipelineState(cwd: string): void {
@@ -1651,6 +1698,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           : `${state.phase.toUpperCase()} is unfinished. Continue from the current phase now?`
       );
       if (resumeNow) {
+        const diagnosis = diagnoseRecoveryState(state);
+        state = prepareExplicitWorkRecovery(bb, state, diagnosis);
         ctx.ui.notify("Resuming unfinished morph flow...", "info");
         await runMorphPipeline("", ctx as any);
       } else {
@@ -2758,12 +2807,10 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         state = bb.getState();
       } else if (
         diagnosis.taskId &&
-        diagnosis.autoSafe &&
         state.phase === "work" &&
         state.workResults.some((result) => result.taskId === diagnosis.taskId && result.status !== "done")
       ) {
-        bb.clearWorkResults([diagnosis.taskId]);
-        state = bb.getState();
+        state = prepareExplicitWorkRecovery(bb, state, diagnosis);
       }
 
       const checkpointCount = Object.keys(state.flowCheckpoints[state.phase] || {}).length;

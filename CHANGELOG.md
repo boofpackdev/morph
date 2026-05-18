@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.7.9 - Create the room before entering it
+
+### Fixed
+- Work tasks whose `targetDir` does not exist yet now launch from the project root instead of failing before they can create the directory
+- Repo-relative task file verification now stays anchored at the project root even when agents work inside nested target directories
+- Target-directory guidance now tells agents when the directory may need to be created as part of the task
+
+## 0.7.8 - Manual recovery means retry
+
+### Fixed
+- Explicit `/morph:recover` now clears the selected failed work branch even when the failure is intentionally not auto-safe
+- Startup “Resume now” prepares work recovery before rerunning the phase instead of immediately re-halting on persisted failed results
+- Manual recovery and startup resume now share the same failed-branch reset behavior
+
+### Changed
+- Automatic recovery remains conservative, while operator-chosen recovery now behaves like an actual retry command
+
+## 0.7.7 - Stop spinning on ghosts
+
+### Added
+- `CLI_LAUNCH_FAILURE` classification for missing runtime / process-launch failures
+- Richer child-process diagnostics with spawn errors, structured agent errors, last assistant output, and recent non-JSON stdout
+
+### Fixed
+- Stale blocked tasks are cleared once their dependencies have recovered, so resumed branches become runnable again
+- Recovery no longer fixates on a blocked leaf whose dependencies are already complete
+- Dead current-runtime paths are no longer selected for pi relaunches
+- Auto-recovery now consumes durable retry budget when it clears failed work, preventing infinite first-attempt loops
+
+### Packaging
+- Follow-up npm release so installed pi packages can receive the 0.7.x recovery fixes instead of remaining on older published builds
+
 ## 0.7.6 - Recover the real branch
 
 ### Added

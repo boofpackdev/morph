@@ -193,6 +193,7 @@ export const WorkTaskResultSchema = z.object({
     .enum([
       "NO_EFFECT",
       "TOOL_FAILURE",
+      "CLI_LAUNCH_FAILURE",
       "AUTH_OR_QUOTA_FAILURE",
       "REVIEW_REJECTED",
       "REVIEW_FORMAT_INVALID",
