@@ -19,7 +19,7 @@ import {
 } from "../core/agent-runner.js";
 import { estimateTokens } from "../core/tokenizer.js";
 import { formatProgress } from "../core/engine.js";
-import type { ReviewOutput, TaskNode, WorkTaskResult } from "../schemas/contracts.js";
+import type { ReviewOutput, ReviewTelemetry, TaskNode, WorkTaskResult } from "../schemas/contracts.js";
 
 export interface ReviewFlowOptions {
   cwd: string;
@@ -57,6 +57,15 @@ export async function executeReviewFlow(
   );
   const focusInstruction = focus ? `\n\n## Review Focus\n${focus}` : "";
   const routing = determineReviewRouting(planOutput.tasks, workResults);
+  blackboard.setReviewTelemetry({
+    stage: "specialist-review",
+    routing,
+    qa: {},
+    perf: {},
+    user: {},
+    synthesis: {},
+    nextStep: "run routed specialists",
+  });
 
   // ── Run three review agents in parallel ──
 
@@ -179,6 +188,35 @@ Be brutally honest. You're the customer, not a developer.`;
     blackboard.addTokens("review", estimateTokens(userOutput));
     blackboard.setFlowCheckpoint("review", "user", userOutput);
   }
+  blackboard.setReviewTelemetry({
+    ...(blackboard.getState().reviewTelemetry ?? createEmptyReviewTelemetry()),
+    stage: "synthesizing",
+    qa: {
+      signalsFound:
+        countListItems(extractLooseSection(qaOutput, "TEST GAPS")) +
+        countListItems(extractLooseSection(qaOutput, "EDGE CASES MISSED")),
+      notableGap:
+        firstMeaningfulLine(extractLooseSection(qaOutput, "TEST GAPS")) ||
+        firstMeaningfulLine(extractLooseSection(qaOutput, "EDGE CASES MISSED")),
+    },
+    perf: {
+      signalsFound:
+        countListItems(extractLooseSection(perfOutput, "BOTTLENECKS")) +
+        countListItems(extractLooseSection(perfOutput, "OPTIMIZATION SUGGESTIONS")),
+      notableConcern:
+        firstMeaningfulLine(extractLooseSection(perfOutput, "BOTTLENECKS")) ||
+        firstMeaningfulLine(extractLooseSection(perfOutput, "OPTIMIZATION SUGGESTIONS")),
+    },
+    user: {
+      signalsFound:
+        countListItems(extractLooseSection(userOutput, "USABILITY ISSUES")) +
+        countListItems(extractLooseSection(userOutput, "MISSING FROM USER'S VIEW")),
+      notableConcern:
+        firstMeaningfulLine(extractLooseSection(userOutput, "USABILITY ISSUES")) ||
+        firstMeaningfulLine(extractLooseSection(userOutput, "MISSING FROM USER'S VIEW")),
+    },
+    nextStep: "synthesize final review",
+  });
 
   // ── Tech Lead synthesizes final review ──
   const techLeadSystemPrompt = `You are the **Tech Lead** for the morph orchestration pipeline.
@@ -252,6 +290,15 @@ For each change needed, use this exact one-line format:
       reviewOutput.status !== "APPROVED" && reviewOutput.requiredChanges.length === 0
         ? `Your prior verdict was ${reviewOutput.status}, but REQUIRED CHANGES was empty.`
         : `Your prior verdict was APPROVED, but REQUIRED CHANGES still contained major or critical items.`;
+    blackboard.setReviewTelemetry({
+      ...(blackboard.getState().reviewTelemetry ?? createEmptyReviewTelemetry()),
+      stage: "repairing",
+      recovery: {
+        issue: repairReason,
+        action: "repair final review",
+      },
+      nextStep: "repair final review",
+    });
     techLeadOutput =
       (
         await runAgent(techLead, {
@@ -277,6 +324,22 @@ For each change needed, use this exact one-line format:
     `Tech Lead synthesis with QA + Perf + User input`
   );
 
+  blackboard.setReviewTelemetry({
+    ...(blackboard.getState().reviewTelemetry ?? createEmptyReviewTelemetry()),
+    stage: "ready",
+    synthesis: {
+      verdict: reviewOutput.status,
+      score: reviewOutput.efficiencyScore,
+      requiredChanges: reviewOutput.requiredChanges.length,
+      securityIssues: reviewOutput.securityIssues.length,
+      coverageAssessment: reviewOutput.testCoverageAssessment,
+    },
+    recovery: undefined,
+    nextStep:
+      reviewOutput.status === "APPROVED"
+        ? "approve ship gate"
+        : "return required changes to work",
+  });
   blackboard.setReviewOutput(reviewOutput);
 
   return reviewOutput;
@@ -347,6 +410,20 @@ function buildReviewContext(
 
   return lines.join("\n");
 }
+
+function createEmptyReviewTelemetry(): ReviewTelemetry {
+  return {
+    stage: "routing",
+    routing: { qa: false, perf: false, user: false },
+    qa: {},
+    perf: {},
+    user: {},
+    synthesis: {},
+    nextStep: "route review specialists",
+  };
+}
+
+import { extractLooseSection, countListItems, firstMeaningfulLine } from "../utils/markdown-parsing.js";
 
 function parseReviewOutput(
   techLeadText: string,

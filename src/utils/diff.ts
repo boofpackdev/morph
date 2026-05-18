@@ -5,9 +5,11 @@
  * agents produce patches (diffs) for review and application.
  */
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+
+const SAFE_FILENAME_RE = /^[a-zA-Z0-9._\-\/]+$/;
 
 /**
  * Generate a unified diff between two strings (old and new content).
@@ -19,6 +21,9 @@ export function generateDiff(
   filename: string = "file"
 ): string {
   // Try git diff for reliable unified diffs
+  if (!SAFE_FILENAME_RE.test(filename)) {
+    throw new Error(`Unsafe filename: ${filename.replace(/[^a-zA-Z0-9._\-\/]/g, "?")}`);
+  }
   try {
     const tmpDir = fs.mkdtempSync("morph-diff-");
     const oldPath = path.join(tmpDir, `a_${filename}`);
@@ -27,8 +32,9 @@ export function generateDiff(
     fs.writeFileSync(oldPath, oldContent, "utf-8");
     fs.writeFileSync(newPath, newContent, "utf-8");
 
-    const diff = execSync(
-      `git diff --no-index --unified=3 -- "${oldPath}" "${newPath}"`,
+    const diff = execFileSync(
+      "git",
+      ["diff", "--no-index", "--unified=3", "--", oldPath, newPath],
       { encoding: "utf-8", timeout: 5000 }
     );
 
@@ -143,7 +149,7 @@ export function applyDiff(content: string, diff: string): string {
     const diffPath = path.join(tmpDir, "patch.diff");
     fs.writeFileSync(diffPath, diff, "utf-8");
 
-    execSync(`git apply -- "${diffPath}"`, {
+    execFileSync("git", ["apply", "--", diffPath], {
       cwd: tmpDir,
       encoding: "utf-8",
       timeout: 5000,

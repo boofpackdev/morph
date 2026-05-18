@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.11 - Keep humans for judgment, not cleanup
+
+### Added
+- Shared browser-gate design system for Spark, pre-work, review, and exception decisions
+- A distinct release-exception gate when Morph cannot clear the ship-readiness floor or repair the issue automatically
+- Review telemetry that explains specialist routing, synthesis, and next steps in the TUI and browser gates
+- Dark mode, markdown-lite rendering, accessible status icons, and dynamic mobile spacing for browser gate pages
+
+### Changed
+- Ordinary Review → Ship approval now appears only for real ship candidates under a pragmatic quality floor
+- Below-floor reviews with precise task IDs return to targeted repair instead of broad rework
+- Below-floor reviews without safe automatic repair now pause for explicit human exception handling
+
+### Fixed
+- Automatic review no longer runs when WORK is incomplete after recovery
+- Vague negative reviews no longer clear completed work results wholesale
+- Stale review output and telemetry are cleared before a fresh review pass
+
 ## 0.7.10 - Say what is true now
 
 ### Fixed

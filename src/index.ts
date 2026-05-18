@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { Blackboard, getMorphDir } from "./core/blackboard.js";
+import { Blackboard, getMorphDir, type ArchivedMorphState } from "./core/blackboard.js";
 import { detectFileTargetOverlaps, formatDAG, formatProgress, waveGroups, estimatePhaseTokens } from "./core/engine.js";
 import { formatTokens } from "./core/tokenizer.js";
 import { executeSparkFlow } from "./flows/spark.js";
@@ -37,12 +37,44 @@ import {
 } from "./tui/display.js";
 import { startMorphServer, serverEvents } from "./server/server.js";
 import type { Server } from "node:http";
-import type { PlanOutput, SparkOutput } from "./schemas/contracts.js";
+import type { MorphState, PlanOutput, ReviewOutput, SparkOutput } from "./schemas/contracts.js";
 import { renderSkillProfiles } from "./core/skill-profiles.js";
+import {
+  summarizeRecoveryState,
+  diagnoseRecoveryState,
+  persistRecoveryReport,
+  shouldAutoRecoverWithinWork,
+  clearAutoRecoverableTaskResult,
+  clearWorkResultBranch,
+  prepareExplicitWorkRecovery,
+  restoreTrustedRegressionSnapshot,
+} from "./core/recovery.js";
+import {
+  escapeHtml,
+  renderHtmlList,
+  renderMarkdownLite,
+  renderBrowserGatePage,
+  buildWorkSpecHtml,
+  buildSparkApprovalHtml,
+  buildReviewApprovalHtml,
+  buildReviewExceptionHtml,
+  assessReviewReadiness,
+  isWorkReadyForReview,
+  type ReviewReadinessAssessment,
+} from "./tui/browser-gates.js";
 
-function escapeHtml(text: string): string {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+const MORPH_VERSION = readMorphVersion();
+
+function readMorphVersion(): string {
+  try {
+    const raw = fs.readFileSync(new URL("../package.json", import.meta.url), "utf-8");
+    const parsed = JSON.parse(raw) as { version?: string };
+    return parsed.version || "dev";
+  } catch {
+    return "dev";
+  }
 }
+
 
 function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
   const waves = waveGroups(plan.tasks);
@@ -115,161 +147,6 @@ function buildWorkSpecMarkdown(plan: PlanOutput, spark?: SparkOutput): string {
     plan.humanReviewNotes || "Approved as written."
   );
   return lines.join("\n");
-}
-
-function renderHtmlList(items: string[], fallback: string): string {
-  const values = items.length ? items : [fallback];
-  return `<ul>${values.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>`;
-}
-
-function buildWorkSpecHtml(plan: PlanOutput, markdown: string, spark?: SparkOutput): string {
-  const fileOverlaps = detectFileTargetOverlaps(plan.tasks);
-  const taskRows = plan.tasks.map((task) => `<tr><td><code>${escapeHtml(task.id)}</code></td><td>${escapeHtml(task.description)}</td><td>${escapeHtml(task.category)}</td><td>${escapeHtml(task.estimatedComplexity)}</td><td>${escapeHtml(task.dependsOn.join(", ") || "none")}</td><td>${escapeHtml(task.acceptanceCriteria)}</td></tr>`).join("\n");
-  const waveCards = waveGroups(plan.tasks).map((wave, index) => `
-    <section class="wave">
-      <h3>Wave ${index + 1}</h3>
-      <ol>${wave.map((task) => `<li><strong>${escapeHtml(task.id)}</strong> ${escapeHtml(task.description)}</li>`).join("")}</ol>
-    </section>`).join("");
-  const productIntent = spark
-    ? `<section class="panel identity">
-        <h2>What morph believes it is building</h2>
-        <div class="identity-grid">
-          <div><span>Deliverable type</span><strong>${escapeHtml(spark.productShape.deliverableType)}</strong></div>
-          <div><span>Runtime / host</span><strong>${escapeHtml(spark.productShape.runtime)}</strong></div>
-          <div><span>Distribution</span><strong>${escapeHtml(spark.productShape.distribution)}</strong></div>
-          <div><span>Explicit user intent</span><strong>${escapeHtml(spark.productShape.explicitUserIntent)}</strong></div>
-        </div>
-      </section>
-      <section class="hero-grid">
-        <div class="panel">
-          <h2>What we are building</h2>
-          <p>${escapeHtml(spark.visionStatement)}</p>
-        </div>
-        <div class="panel">
-          <h2>Success criteria</h2>
-          ${renderHtmlList(spark.successCriteria, "No explicit success criteria captured.")}
-        </div>
-      </section>
-      <section class="split">
-        <div class="panel">
-          <h2>Core features</h2>
-          ${renderHtmlList(spark.coreFeatures, "No features captured.")}
-        </div>
-        <div class="panel">
-          <h2>Constraints</h2>
-          ${renderHtmlList(spark.constraints, "No hard constraints captured.")}
-        </div>
-      </section>`
-    : "";
-  const overlapPanel = fileOverlaps.length
-    ? `<section class="panel overlap">
-        <h2>File target overlaps</h2>
-        <p>These planned tasks name the same concrete file target. Same-wave overlaps are the ones most likely to turn into live collisions.</p>
-        <ul>${fileOverlaps.map((overlap) => `<li><strong>${escapeHtml(overlap.severity.toUpperCase())}</strong> <code>${escapeHtml(overlap.file)}</code> — ${escapeHtml(overlap.taskIds.join(", "))} (waves ${escapeHtml(overlap.waveNumbers.join(", "))}). ${escapeHtml(overlap.suggestion)}</li>`).join("")}</ul>
-      </section>`
-    : "";
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>morph Work Approval</title>
-  <style>
-    :root{color-scheme:light;--ink:#172033;--muted:#5b6475;--line:#dbe2ee;--paper:#f7f9fc;--card:#fff;--accent-soft:#eef1ff;--warn:#fff7ed;--warn-line:#fb923c;--ok:#0f766e}
-    *{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;line-height:1.55}
-    main{max-width:1180px;margin:0 auto;padding:36px 24px 56px}
-    header{display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:24px}
-    h1{font-size:2rem;line-height:1.1;margin:0 0 8px}h2{font-size:1rem;margin:0 0 10px}h3{margin:0 0 8px}
-    .eyebrow{letter-spacing:.08em;text-transform:uppercase;font-size:.72rem;color:var(--muted);font-weight:700}
-    .subtle{color:var(--muted);margin:0}.metrics{display:flex;gap:10px;flex-wrap:wrap}
-    .metric{background:var(--accent-soft);color:#3343bf;padding:8px 12px;border-radius:999px;font-weight:700;font-size:.9rem}
-    .notice{background:var(--warn);border-left:4px solid var(--warn-line);padding:16px 18px;border-radius:14px;margin:18px 0 22px}
-    .hero-grid,.split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:16px 0}
-    .panel,.wave,.spec{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
-    .identity{border-color:#c7d2fe;background:#f8faff}.identity-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.identity span{display:block;color:var(--muted);font-size:.78rem;text-transform:uppercase;letter-spacing:.06em}.identity strong{display:block;margin-top:4px}
-    .overlap{border-color:#fdba74;background:#fff7ed}
-    .wave-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
-    table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden}
-    th,td{padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top;text-align:left;font-size:.92rem}
-    th{background:#f2f5fb;color:#334155}tr:last-child td{border-bottom:0}
-    pre{margin:0;background:#0f172a;color:#e2e8f0;padding:16px;border-radius:14px;overflow:auto}
-    code{background:#eef2ff;padding:2px 5px;border-radius:6px}
-    .actions{position:sticky;bottom:16px;margin-top:24px;display:flex;gap:12px;align-items:center;background:rgba(255,255,255,.92);backdrop-filter:blur(8px);border:1px solid var(--line);border-radius:18px;padding:14px 16px}
-    button{border:0;border-radius:12px;padding:12px 16px;font:inherit;font-weight:700;cursor:pointer}
-    .approve{background:var(--ok);color:white}.pause{background:#e2e8f0;color:#334155}
-    #browser-status{color:var(--muted);font-size:.92rem}
-    @media(max-width:800px){header,.hero-grid,.split{display:block}.identity-grid{display:block}.identity-grid>div+div{margin-top:12px}.metrics{margin-top:16px}.panel{margin-top:16px}}
-  </style>
-</head>
-<body>
-  <main>
-    <header>
-      <div>
-        <div class="eyebrow">morph approval gate</div>
-        <h1>Pre-work specification review</h1>
-        <p class="subtle">Final human checkpoint before implementation begins.</p>
-      </div>
-      <div class="metrics">
-        <span class="metric">${plan.tasks.length} tasks</span>
-        <span class="metric">${waveGroups(plan.tasks).length} waves</span>
-        <span class="metric">${escapeHtml(plan.estimatedEffort)}</span>
-      </div>
-    </header>
-    <div class="notice"><strong>Approval meaning:</strong> the implementation plan below is ready to hand to the Engineer and Peer Reviewer agents. Use the pi editor if you want to change the spec; approve here only when the plan is ready as shown.</div>
-    ${productIntent}
-    ${overlapPanel}
-    <section class="panel">
-      <h2>Architecture</h2>
-      <pre>${escapeHtml(plan.architectureDiagram)}</pre>
-    </section>
-    <section>
-      <h2>Execution waves</h2>
-      <div class="wave-grid">${waveCards}</div>
-    </section>
-    <section class="panel">
-      <h2>Task DAG</h2>
-      <table><thead><tr><th>ID</th><th>Description</th><th>Category</th><th>Complexity</th><th>Dependencies</th><th>Acceptance</th></tr></thead><tbody>${taskRows}</tbody></table>
-    </section>
-    <section class="split">
-      <div class="panel">
-        <h2>QA strategy</h2>
-        <p>${escapeHtml(plan.qaStrategy)}</p>
-      </div>
-      <div class="panel">
-        <h2>Risk mitigations</h2>
-        ${renderHtmlList(plan.riskMitigations, "No explicit mitigations captured.")}
-      </div>
-    </section>
-    <section class="spec">
-      <h2>Approved spec snapshot</h2>
-      <pre>${escapeHtml(markdown)}</pre>
-    </section>
-    <div class="actions">
-      <button class="approve" onclick="sendDecision('approve')">Approve &amp; start WORK</button>
-      <button class="pause" onclick="sendDecision('reject')">Pause pipeline</button>
-      <span id="browser-status">You can also approve from the pi session.</span>
-    </div>
-  </main>
-  <script>
-    async function sendDecision(decision) {
-      const status = document.getElementById('browser-status');
-      status.textContent = decision === 'approve' ? 'Sending approval…' : 'Pausing pipeline…';
-      try {
-        await fetch('http://localhost:4040/api/' + decision, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ phase: 'pre-work' })
-        });
-        status.textContent = decision === 'approve'
-          ? 'Approved in browser. WORK will begin in the pi session.'
-          : 'Pipeline paused from browser.';
-      } catch (err) {
-        status.textContent = 'Could not reach morph Mission Control on localhost:4040.';
-      }
-    }
-  </script>
-</body>
-</html>`;
 }
 
 function openFileInBrowser(filePath: string): void {
@@ -654,428 +531,6 @@ export default function (pi: ExtensionAPI) {
     return getBB(activeWorkspaceCwd);
   }
 
-  function summarizeRecoveryState(state: ReturnType<Blackboard["getState"]>): {
-    unfinished: boolean;
-    kind: "none" | "recoverable" | "restartable" | "stale";
-    checkpointCount: number;
-    doneTasks: number;
-    totalTasks: number;
-    failedTasks: number;
-    blockedTasks: number;
-    message: string;
-  } {
-    const checkpointCount = Object.keys(state.flowCheckpoints[state.phase] || {}).length;
-    const doneTasks = state.workResults.filter((result) => result.status === "done").length;
-    const failedTasks = state.workResults.filter((result) => result.status === "failed").length;
-    const blockedTasks = state.workResults.filter((result) => result.status === "blocked").length;
-    const totalTasks = state.planOutput?.tasks.length ?? 0;
-    const unfinished = state.phase !== "idle" && state.phase !== "done";
-    const hasPhaseCheckpoints = checkpointCount > 0;
-    const hasRestartContext =
-      state.phase === "spark"
-        ? Boolean(state.pipelinePrompt?.trim())
-        : state.phase === "plan"
-          ? Boolean(state.sparkOutput)
-          : state.phase === "work"
-            ? Boolean(state.planOutput)
-            : state.phase === "review"
-              ? Boolean(state.planOutput && state.workResults.length > 0)
-              : state.phase === "ship"
-                ? Boolean(state.reviewOutput)
-                : false;
-    const hasMaterialProgress =
-      Boolean(state.sparkOutput) ||
-      Boolean(state.planOutput) ||
-      state.workResults.length > 0 ||
-      Boolean(state.reviewOutput) ||
-      Boolean(state.shipOutput) ||
-      state.tokenLedger.total > 0 ||
-      state.decisions.length > 0;
-    const kind: "none" | "recoverable" | "restartable" | "stale" =
-      !unfinished
-        ? "none"
-        : !hasRestartContext
-          ? "stale"
-          : hasPhaseCheckpoints || hasMaterialProgress
-          ? "recoverable"
-          : "restartable";
-
-    if (!unfinished) {
-      return {
-        unfinished,
-        kind,
-        checkpointCount,
-        doneTasks,
-        totalTasks,
-        failedTasks,
-        blockedTasks,
-        message: "",
-      };
-    }
-
-    const progress =
-      totalTasks > 0
-        ? `tasks ${doneTasks}/${totalTasks}${failedTasks > 0 ? `, ${failedTasks} failed` : ""}${blockedTasks > 0 ? `, ${blockedTasks} blocked` : ""}`
-        : "no task DAG yet";
-    const checkpoints =
-      checkpointCount > 0
-        ? `${checkpointCount} checkpoint${checkpointCount === 1 ? "" : "s"} available`
-        : "no checkpoints saved";
-
-    return {
-      unfinished,
-      kind,
-      checkpointCount,
-      doneTasks,
-      totalTasks,
-      failedTasks,
-      blockedTasks,
-      message:
-        kind === "restartable"
-          ? `unfinished morph setup found in this folder: ${state.phase} · ${progress} · ${checkpoints}`
-          : `unfinished morph flow detected in this folder: ${state.phase} · ${progress} · ${checkpoints}`,
-    };
-  }
-
-  function diagnoseRecoveryState(state: ReturnType<Blackboard["getState"]>): {
-    taskId?: string;
-    failureKind?: string;
-    evidence: string[];
-    recommendation: string;
-    autoSafe: boolean;
-  } {
-    const latestFailed = [...state.workResults]
-      .reverse()
-      .find((result) => result.status === "failed" || result.status === "blocked");
-    const latestRecoverableFailure = findLatestRecoverableFailure(state, latestFailed);
-    const impossibleSuccess = [...state.workResults]
-      .reverse()
-      .find((result) => result.status === "done" && result.filesChanged.length === 0);
-
-    if (impossibleSuccess) {
-      return {
-        taskId: impossibleSuccess.taskId,
-        failureKind: "STATE_INCONSISTENT",
-        evidence: [
-          "Task is marked done but has no recorded file changes.",
-          "Persisted success no longer passes the stricter completion standard.",
-        ],
-        recommendation: "Clear the untrusted task result and rerun it from Work.",
-        autoSafe: true,
-      };
-    }
-
-    if (!latestRecoverableFailure) {
-      return {
-        evidence: ["No failed or blocked task result is currently recorded."],
-        recommendation: "Resume the current phase from its saved state.",
-        autoSafe: true,
-      };
-    }
-
-    const kind = latestRecoverableFailure.failureKind;
-    switch (kind) {
-      case "NO_EFFECT":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Rerun the task with explicit completion evidence and expected file targets.",
-          autoSafe: true,
-        };
-      case "TOOL_FAILURE":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Retry the task; the last failure came from the execution layer rather than the task itself.",
-          autoSafe: true,
-        };
-      case "CLI_LAUNCH_FAILURE":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Repair the pi/Node launch path before retrying; the agent process could not be started.",
-          autoSafe: false,
-        };
-      case "AUTH_OR_QUOTA_FAILURE":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Fix provider access or credits, or switch provider/model config, before retrying this task.",
-          autoSafe: false,
-        };
-      case "REVIEW_REJECTED":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Rerun the task with reviewer feedback injected into the next attempt.",
-          autoSafe: true,
-        };
-      case "REVIEW_FORMAT_INVALID":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Retry the review path; implementation may be fine, but the reviewer response was malformed.",
-          autoSafe: true,
-        };
-      case "VERIFICATION_FAILED":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Rerun the task against the missing expected artifacts before trusting another approval.",
-          autoSafe: true,
-        };
-      case "DEPENDENCY_BLOCKED":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Recover the failed dependency first; blocked children should not be retried in isolation.",
-          autoSafe: false,
-        };
-      case "TASK_UNDERSPECIFIED":
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Replan the task before spending more implementation attempts on fog.",
-          autoSafe: false,
-        };
-      default:
-        return {
-          taskId: latestRecoverableFailure.taskId,
-          failureKind: kind,
-          evidence: latestRecoverableFailure.failureEvidence,
-          recommendation: "Resume cautiously from the current phase and inspect the task if it fails again.",
-          autoSafe: true,
-        };
-    }
-  }
-
-  function findLatestRecoverableFailure(
-    state: ReturnType<Blackboard["getState"]>,
-    latestFailed: ReturnType<Blackboard["getState"]>["workResults"][number] | undefined
-  ): ReturnType<Blackboard["getState"]>["workResults"][number] | undefined {
-    if (!latestFailed || latestFailed.failureKind !== "DEPENDENCY_BLOCKED") {
-      return latestFailed;
-    }
-
-    const tasksById = new Map(state.planOutput?.tasks.map((task) => [task.id, task]) ?? []);
-    const resultsById = new Map(state.workResults.map((result) => [result.taskId, result]));
-    const visited = new Set<string>();
-    const rootFailures: ReturnType<Blackboard["getState"]>["workResults"] = [];
-
-    const visit = (taskId: string): void => {
-      if (visited.has(taskId)) return;
-      visited.add(taskId);
-
-      const result = resultsById.get(taskId);
-      if (result && result.status === "failed") {
-        rootFailures.push(result);
-        return;
-      }
-
-      const task = tasksById.get(taskId);
-      for (const dependencyId of task?.dependsOn ?? []) {
-        visit(dependencyId);
-      }
-    };
-
-    visit(latestFailed.taskId);
-
-    if (rootFailures.length === 0) {
-      const completedIds = new Set(
-        state.workResults
-          .filter((result) => result.status === "done")
-          .map((result) => result.taskId)
-      );
-      const latestBlockedTask = tasksById.get(latestFailed.taskId);
-      const dependenciesRecovered =
-        latestBlockedTask?.dependsOn.every((dependencyId) => completedIds.has(dependencyId)) ?? false;
-      if (dependenciesRecovered) {
-        return [...state.workResults]
-          .reverse()
-          .find((result) => result.status === "failed");
-      }
-      return latestFailed;
-    }
-
-    const resultOrder = new Map(state.workResults.map((result, index) => [result.taskId, index]));
-    return rootFailures.sort(
-      (a, b) => (resultOrder.get(b.taskId) ?? -1) - (resultOrder.get(a.taskId) ?? -1)
-    )[0];
-  }
-
-  function buildRecoveryReport(
-    state: ReturnType<Blackboard["getState"]>,
-    diagnosis: ReturnType<typeof diagnoseRecoveryState>
-  ): string {
-    const task = diagnosis.taskId
-      ? state.planOutput?.tasks.find((candidate) => candidate.id === diagnosis.taskId)
-      : undefined;
-    const result = diagnosis.taskId
-      ? [...state.workResults].reverse().find((candidate) => candidate.taskId === diagnosis.taskId)
-      : undefined;
-    const changedFiles = result?.filesChanged ?? [];
-    const verification = result?.verification;
-    const lines = [
-      `# Recovery Report${diagnosis.taskId ? ` — ${diagnosis.taskId}` : ""}`,
-      "",
-      `- **Generated**: ${new Date().toISOString()}`,
-      `- **Phase**: ${state.phase}`,
-      `- **Failure kind**: ${diagnosis.failureKind || "RESUME"}`,
-      `- **Auto-safe**: ${diagnosis.autoSafe ? "yes" : "no"}`,
-      "",
-      "## Diagnosis",
-      diagnosis.evidence.length > 0
-        ? diagnosis.evidence.map((item) => `- ${item}`).join("\n")
-        : "- No specific failure evidence recorded.",
-      "",
-      "## Recommended Next Move",
-      diagnosis.recommendation,
-      "",
-    ];
-
-    if (task) {
-      lines.push(
-        "## Task Context",
-        `- **Description**: ${task.description}`,
-        `- **Category**: ${task.category}`,
-        `- **Acceptance criteria**: ${task.acceptanceCriteria}`,
-        `- **Expected files**: ${task.files?.length ? task.files.join(", ") : "none declared"}`,
-        ""
-      );
-    }
-
-    if (result) {
-      lines.push(
-        "## Latest Task Result",
-        `- **Status**: ${result.status}`,
-        `- **Attempts**: ${result.attemptCount ?? "unknown"}`,
-        `- **Summary**: ${result.summary}`,
-        `- **Changed files**: ${changedFiles.length > 0 ? changedFiles.join(", ") : "none"}`,
-        ""
-      );
-    }
-
-    if (verification) {
-      lines.push(
-        "## Verification",
-        `- **Changed files detected**: ${verification.changedFilesDetected ? "yes" : "no"}`,
-        `- **Expected files satisfied**: ${
-          verification.expectedFilesSatisfied === undefined
-            ? "not applicable"
-            : verification.expectedFilesSatisfied
-              ? "yes"
-              : "no"
-        }`,
-        `- **Matched expected files**: ${
-          verification.matchedExpectedFiles.length > 0
-            ? verification.matchedExpectedFiles.join(", ")
-            : "none"
-        }`,
-        ...(verification.notes.length > 0 ? ["", ...verification.notes.map((note) => `- ${note}`)] : []),
-        ""
-      );
-    }
-
-    lines.push(
-      "## Operator Notes",
-      diagnosis.autoSafe
-        ? "- Morph can safely attempt the recommended recovery automatically."
-        : "- Morph should not pretend this is routine. Human judgment or upstream repair is recommended before continuing.",
-      "",
-      renderSkillProfiles(["debugging-and-error-recovery"]),
-      ""
-    );
-
-    return lines.join("\n");
-  }
-
-  function persistRecoveryReport(
-    bb: Blackboard,
-    state: ReturnType<Blackboard["getState"]>,
-    diagnosis: ReturnType<typeof diagnoseRecoveryState>
-  ): string | undefined {
-    if (!diagnosis.taskId) return undefined;
-    return bb.writeRecoveryReport(diagnosis.taskId, buildRecoveryReport(state, diagnosis));
-  }
-
-  function shouldAutoRecoverWithinWork(
-    state: ReturnType<Blackboard["getState"]>,
-    diagnosis: ReturnType<typeof diagnoseRecoveryState>
-  ): boolean {
-    const historicalRetries = diagnosis.taskId ? state.retries[diagnosis.taskId] || 0 : 0;
-    return (
-      state.phase === "work" &&
-      Boolean(diagnosis.taskId) &&
-      diagnosis.autoSafe &&
-      historicalRetries < 6 &&
-      ["NO_EFFECT", "TOOL_FAILURE", "REVIEW_REJECTED", "REVIEW_FORMAT_INVALID", "VERIFICATION_FAILED", "STATE_INCONSISTENT"]
-        .includes(diagnosis.failureKind || "")
-    );
-  }
-
-  function clearAutoRecoverableTaskResult(
-    bb: Blackboard,
-    diagnosis: ReturnType<typeof diagnoseRecoveryState>
-  ): void {
-    if (!diagnosis.taskId) return;
-    bb.incrementRetry(diagnosis.taskId);
-    clearWorkResultBranch(bb, diagnosis.taskId);
-  }
-
-  function clearWorkResultBranch(
-    bb: Blackboard,
-    taskId: string
-  ): void {
-    const state = bb.getState();
-    const taskIdsToClear = new Set<string>([taskId]);
-    const tasks = state.planOutput?.tasks ?? [];
-    let changed = true;
-
-    // Any descendant that was only blocked because of the failed root must be
-    // reconsidered after the root is retried. Leaving those stale blocked
-    // results in place makes the DAG appear permanently processed even after
-    // the dependency is healthy again.
-    while (changed) {
-      changed = false;
-      for (const task of tasks) {
-        if (taskIdsToClear.has(task.id)) continue;
-        const result = state.workResults.find((candidate) => candidate.taskId === task.id);
-        const dependsOnClearedTask = task.dependsOn.some((dependencyId) => taskIdsToClear.has(dependencyId));
-        if (dependsOnClearedTask && result?.status === "blocked") {
-          taskIdsToClear.add(task.id);
-          changed = true;
-        }
-      }
-    }
-
-    bb.clearWorkResults([...taskIdsToClear]);
-  }
-
-  function prepareExplicitWorkRecovery(
-    bb: Blackboard,
-    state: ReturnType<Blackboard["getState"]>,
-    diagnosis: ReturnType<typeof diagnoseRecoveryState>
-  ): ReturnType<Blackboard["getState"]> {
-    if (
-      state.phase === "work" &&
-      diagnosis.taskId &&
-      state.workResults.some((result) => result.taskId === diagnosis.taskId && result.status !== "done")
-    ) {
-      clearWorkResultBranch(bb, diagnosis.taskId);
-      return bb.getState();
-    }
-    return state;
-  }
-
   function deletePipelineState(cwd: string): void {
     currentAbortController?.abort();
     currentAbortController = null;
@@ -1086,18 +541,57 @@ export default function (pi: ExtensionAPI) {
     fs.rmSync(getMorphDir(cwd), { recursive: true, force: true });
   }
 
-  function ensureDefaultModelConfig(ctx: any): void {
+  function clearStaleEnvironmentFailures(bb: Blackboard): number {
+    const staleEnvironmentFailures = bb
+      .getState()
+      .workResults
+      .filter(
+        (result) =>
+          result.status === "failed" &&
+          ["TOOL_FAILURE", "AUTH_OR_QUOTA_FAILURE", "CLI_LAUNCH_FAILURE"].includes(result.failureKind || "")
+      )
+      .map((result) => result.taskId);
+
+    for (const taskId of staleEnvironmentFailures) {
+      clearWorkResultBranch(bb, taskId);
+    }
+
+    return staleEnvironmentFailures.length;
+  }
+
+  function syncInheritedModelConfig(ctx: any): { changed: boolean; clearedFailures: number } {
     const bb = bindWorkspace(ctx.cwd);
     const state = bb.getState();
-    if (state.config?.provider || state.config?.model) return;
+    if (state.config?.source === "manual") {
+      return { changed: false, clearedFailures: 0 };
+    }
 
     const model = ctx.model;
-    if (model?.provider || model?.id) {
-      bb.setConfig({
-        provider: model.provider ? String(model.provider) : undefined,
-        model: model.id ? String(model.id) : undefined,
-      });
+    if (!model?.provider && !model?.id) {
+      return { changed: false, clearedFailures: 0 };
     }
+
+    const nextProvider = model.provider ? String(model.provider) : undefined;
+    const nextModel = model.id ? String(model.id) : undefined;
+    const changed =
+      state.config?.provider !== nextProvider ||
+      state.config?.model !== nextModel ||
+      state.config?.source !== "inherited";
+
+    if (!changed) {
+      return { changed: false, clearedFailures: 0 };
+    }
+
+    bb.setConfig({
+      provider: nextProvider,
+      model: nextModel,
+      source: "inherited",
+    });
+
+    return {
+      changed: true,
+      clearedFailures: clearStaleEnvironmentFailures(bb),
+    };
   }
 
   function ensureWebServer(): void {
@@ -1134,6 +628,43 @@ export default function (pi: ExtensionAPI) {
     return { promise, dispose };
   }
 
+  async function runBrowserApprovalGate(ctx: any, options: {
+    phase: string;
+    htmlPath: string;
+    browserMessage: string;
+    confirmTitle: string;
+    confirmDescription: string;
+    hint: string;
+  }): Promise<boolean> {
+    const previousStatus = currentStatus;
+    const previousHint = currentHint;
+    currentStatus = "waiting";
+    currentHint = options.hint;
+    updateWidget(ctx);
+
+    ensureWebServer();
+    openFileInBrowser(options.htmlPath);
+    pi.sendMessage({
+      customType: "morph",
+      content: options.browserMessage,
+      display: true,
+      details: { phase: options.phase, htmlPath: options.htmlPath },
+    });
+
+    const browserDecision = createBrowserDecisionWaiter(options.phase);
+    const decision = await Promise.race([
+      browserDecision.promise,
+      ctx.ui.confirm(options.confirmTitle, options.confirmDescription)
+        .then((approved: boolean) => approved ? "approve" as const : "reject" as const),
+    ]);
+    browserDecision.dispose();
+
+    currentStatus = previousStatus;
+    currentHint = previousHint;
+    updateWidget(ctx);
+    return decision === "approve";
+  }
+
   function writeFinalReportArtifacts(ctx: any): { markdownPath: string; htmlPath: string } {
     const morphDir = getMorphDir(ctx.cwd);
     fs.mkdirSync(morphDir, { recursive: true });
@@ -1159,12 +690,6 @@ export default function (pi: ExtensionAPI) {
     const markdownPath = path.join(morphDir, "work-spec.md");
     const htmlPath = path.join(morphDir, "work-approval.html");
 
-    const previousStatus = currentStatus;
-    const previousHint = currentHint;
-    currentStatus = "waiting";
-    currentHint = "approve work spec  |  browser or Pi";
-    updateWidget(ctx);
-
     const edited = await ctx.ui.editor("Review/edit WORK specification before implementation", draftMarkdown);
     if (edited === undefined) {
       ctx.ui.notify("WORK paused. Re-run /morph:run or /morph:work when ready.", "info");
@@ -1178,28 +703,19 @@ export default function (pi: ExtensionAPI) {
     planOutput.humanReviewNotes = edited;
     bb.setPlanOutput(planOutput);
     fs.writeFileSync(htmlPath, buildWorkSpecHtml(planOutput, edited, sparkOutput), "utf-8");
-    ensureWebServer();
-    openFileInBrowser(htmlPath);
+    const approved = await runBrowserApprovalGate(ctx, {
+      phase: "pre-work",
+      htmlPath,
+      browserMessage: `# Pre-Work Specification Review
 
-    pi.sendMessage({ customType: "morph", content: `# Pre-Work Specification Review
+Opened \`${htmlPath}\` for the implementation approval gate. Review the decision summary there, then approve or pause from the browser or pi prompt.`,
+      confirmTitle: "Approve WORK specification?",
+      confirmDescription: "The approval gate is open in your browser. Continue with implementation?",
+      hint: "approve work spec  |  browser or Pi",
+    });
 
-Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from the pi prompt to begin WORK.`, display: true, details: { phase: "pre-work", htmlPath, markdownPath } });
-
-    const browserDecision = createBrowserDecisionWaiter("pre-work");
-    const decision = await Promise.race([
-      browserDecision.promise,
-      ctx.ui.confirm(
-        "Approve WORK specification?",
-        "The final approval report is open in your browser. Continue with implementation?"
-      ).then((approved: boolean) => approved ? "approve" as const : "reject" as const),
-    ]);
-    browserDecision.dispose();
-
-    currentStatus = previousStatus;
-    currentHint = previousHint;
-    updateWidget(ctx);
-
-    if (decision === "reject") {
+    if (!approved) {
+      bb.recordDecision("plan", "Human paused pre-work specification", `Approval artifact: ${htmlPath}`);
       ctx.ui.notify("WORK paused before implementation. Re-run /morph:run or /morph:work when ready.", "info");
       return false;
     }
@@ -1207,6 +723,70 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
     bb.recordDecision("plan", "Human approved pre-work specification", `Approval artifact: ${htmlPath}`);
     ctx.ui.notify("Pre-work specification approved. Starting WORK...", "success" as any);
     return true;
+  }
+
+  async function reviewSparkGate(ctx: any, sparkOutput: SparkOutput): Promise<boolean> {
+    const bb = bindWorkspace(ctx.cwd);
+    const morphDir = getMorphDir(ctx.cwd);
+    fs.mkdirSync(morphDir, { recursive: true });
+    const htmlPath = path.join(morphDir, "spark-approval.html");
+    fs.writeFileSync(htmlPath, buildSparkApprovalHtml(sparkOutput), "utf-8");
+    const approved = await runBrowserApprovalGate(ctx, {
+      phase: "spark",
+      htmlPath,
+      browserMessage: `# Spark Direction Review
+
+Opened \`${htmlPath}\` for the product-direction approval gate. Review the brief at a glance, then approve or pause from the browser or pi prompt.`,
+      confirmTitle: "Proceed to Plan phase?",
+      confirmDescription: "The Spark approval gate is open in your browser. Continue into planning?",
+      hint: "approve product direction  |  browser or Pi",
+    });
+    bb.recordDecision("spark", approved ? "Human approved product direction" : "Human paused product direction", `Approval artifact: ${htmlPath}`);
+    return approved;
+  }
+
+  async function reviewShipGate(ctx: any): Promise<boolean> {
+    const bb = bindWorkspace(ctx.cwd);
+    const state = bb.getState();
+    if (!state.reviewOutput) return false;
+    const morphDir = getMorphDir(ctx.cwd);
+    fs.mkdirSync(morphDir, { recursive: true });
+    const htmlPath = path.join(morphDir, "ship-approval.html");
+    fs.writeFileSync(htmlPath, buildReviewApprovalHtml(state), "utf-8");
+    const approved = await runBrowserApprovalGate(ctx, {
+      phase: "review",
+      htmlPath,
+      browserMessage: `# Release Readiness Review
+
+Opened \`${htmlPath}\` for the review-to-ship approval gate. Inspect the verdict, flags, and release-readiness summary there before continuing.`,
+      confirmTitle: "Proceed to Ship phase?",
+      confirmDescription: "The release-readiness gate is open in your browser. Continue into SHIP?",
+      hint: "approve release readiness  |  browser or Pi",
+    });
+    bb.recordDecision("review", approved ? "Human approved release readiness" : "Human paused release readiness", `Approval artifact: ${htmlPath}`);
+    return approved;
+  }
+
+  async function reviewExceptionGate(ctx: any, readiness: ReviewReadinessAssessment): Promise<boolean> {
+    const bb = bindWorkspace(ctx.cwd);
+    const state = bb.getState();
+    if (!state.reviewOutput) return false;
+    const morphDir = getMorphDir(ctx.cwd);
+    fs.mkdirSync(morphDir, { recursive: true });
+    const htmlPath = path.join(morphDir, "ship-exception.html");
+    fs.writeFileSync(htmlPath, buildReviewExceptionHtml(state, readiness), "utf-8");
+    const accepted = await runBrowserApprovalGate(ctx, {
+      phase: "review-exception",
+      htmlPath,
+      browserMessage: `# Release Exception Review
+
+Opened \`${htmlPath}\` because the normal Review → Ship gate was withheld. Morph could not clear the ship-readiness floor or repair the issue automatically, so continuing now requires an explicit human exception.`,
+      confirmTitle: "Accept release exception?",
+      confirmDescription: "The normal release gate was withheld. Accept this exception and continue into SHIP anyway?",
+      hint: "resolve release exception  |  browser or Pi",
+    });
+    bb.recordDecision("review", accepted ? "Human accepted release exception" : "Human paused release exception", `Approval artifact: ${htmlPath}`);
+    return accepted;
   }
 
   // ── Build display state from blackboard ──
@@ -1271,6 +851,9 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       agents,
       tokenLedger: state.tokenLedger,
       tick: currentTick,
+      startedAt: state.startedAt,
+      versionLabel: MORPH_VERSION,
+      runtimeLabel: `node ${process.version.replace(/^v/, "")}`,
       subagentActivities: liveSubs.length > 0 ? liveSubs : undefined,
       fileActivities,
       fileCollisions,
@@ -1387,7 +970,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
     const runningTasks = tasks.filter((task) => task.status === "running");
     const pendingTasks = tasks.filter((task) => task.status === "pending");
     const doneTasks = tasks.filter((task) => task.status === "done");
-    const blockedTasks = tasks.filter((task) => task.status === "blocked" || task.status === "failed");
+    const failedTasks = tasks.filter((task) => task.status === "failed");
+    const blockedTasks = tasks.filter((task) => task.status === "blocked");
 
     switch (state.phase) {
       case "spark":
@@ -1407,10 +991,11 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           task.status === "done" ? "✓" : task.status === "running" ? "●" : task.status === "failed" || task.status === "blocked" ? "!" : "○"
         ).join(" ");
         const lastFailure = [...state.workResults].reverse().find((result) => result.status !== "done");
-        const halted = blockedTasks.length > 0 && runningTasks.length === 0;
+        const halted = (failedTasks.length > 0 || blockedTasks.length > 0) && runningTasks.length === 0;
         if (halted) {
           return { title: "WORK HALTED", lines: [
-            `done ${doneTasks.length}/${tasks.length}  ·  blocked ${blockedTasks.length}`,
+            `done ${doneTasks.length}/${tasks.length}  ·  failed ${failedTasks.length}  ·  blocked ${blockedTasks.length}`,
+            `pending ${pendingTasks.length} untouched`,
             lastFailure ? `task ${lastFailure.taskId} ${lastFailure.status}` : "task failure recorded",
             lastFailure ? `files ${lastFailure.filesChanged.length} changed` : "files —",
             lastFailure ? lastFailure.summary.replace(/\s+/g, " ").slice(0, 72) : "inspect task history",
@@ -1419,7 +1004,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         }
         if (!workIsBusy && runningTasks.length === 0 && pendingTasks.length > 0 && activeAgents === 0) {
           return { title: "WORK CONTROL", lines: [
-            `done ${doneTasks.length}/${tasks.length}  ·  blocked ${blockedTasks.length}`,
+            `done ${doneTasks.length}/${tasks.length}  ·  failed ${failedTasks.length}  ·  blocked ${blockedTasks.length}`,
             compactQueue ? `queue  ${compactQueue}` : "queue  —",
             shownPending ? `next   ${shownPending}` : "next   work pending",
             "lanes  no active agent",
@@ -1427,7 +1012,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           ]};
         }
         return { title: "WORK CONTROL", lines: [
-          `done ${doneTasks.length}/${tasks.length}  ·  blocked ${blockedTasks.length}`,
+          `done ${doneTasks.length}/${tasks.length}  ·  failed ${failedTasks.length}  ·  blocked ${blockedTasks.length}`,
           compactQueue ? `queue  ${compactQueue}` : "queue  —",
           shownRunning ? `doing  ${shownRunning}` : "doing  —",
           shownPending ? `next   ${shownPending}` : "next   review gate",
@@ -1435,17 +1020,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         ]};
       }
       case "review": {
-        const review = state.reviewOutput;
-        const severities = { critical: 0, major: 0, minor: 0, "nice-to-have": 0 };
-        for (const change of review?.requiredChanges ?? []) severities[change.severity]++;
-        return { title: "REVIEW BOARD", lines: [
-          `QA       ${agentMark("qa-auditor")}────┐`,
-          `PERF     ${agentMark("perf-guru")}────┼──> LEAD ${agentMark("tech-lead")}`,
-          `USER     ${agentMark("end-user")}────┘`,
-          checkpointKeys.size > 0 ? `RESTORED ${[...checkpointKeys].join(", ")}` : "RESTORED —",
-          review ? `VERDICT  ${review.status}  ·  score ${review.efficiencyScore}/10` : "VERDICT  waiting on synthesis",
-          review ? `FINDINGS ${severities.critical} critical  ${severities.major} major  ${severities.minor} minor` : `NEXT     ${activeAgents > 0 ? "auditors active" : "awaiting auditors"}`,
-        ]};
+        return buildReviewIntelligenceContext(state);
       }
       case "ship":
         return { title: "SHIP BOARD", lines: [
@@ -1520,6 +1095,83 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
     return { title: "PLAN INTELLIGENCE", lines };
   }
 
+  function buildReviewIntelligenceContext(
+    state: ReturnType<Blackboard["getState"]>
+  ): PhaseContext {
+    const telemetry = state.reviewTelemetry;
+    const review = state.reviewOutput;
+    const severities: Record<string, number> = { critical: 0, major: 0, minor: 0, "nice-to-have": 0 };
+    for (const change of review?.requiredChanges ?? []) severities[change.severity]++;
+
+    const route = (used?: boolean) => used ? "used" : "skipped";
+    const lines = telemetry
+      ? [
+          `Routing      QA ${route(telemetry.routing.qa)} | Perf ${route(telemetry.routing.perf)} | User ${route(telemetry.routing.user)}`,
+        ]
+      : ["Routing      preparing specialist routing"];
+
+    if (telemetry?.qa.signalsFound !== undefined) {
+      lines.push(
+        telemetry.routing.qa
+          ? `QA           ${telemetry.qa.signalsFound} review signals${telemetry.qa.notableGap ? ` | ${telemetry.qa.notableGap}` : ""}`
+          : "QA           skipped"
+      );
+    } else {
+      lines.push(telemetry?.routing.qa ? "QA           specialist running" : "QA           waiting for routing");
+    }
+
+    if (telemetry?.perf.signalsFound !== undefined) {
+      lines.push(
+        telemetry.routing.perf
+          ? `Performance  ${telemetry.perf.signalsFound} review signals${telemetry.perf.notableConcern ? ` | ${telemetry.perf.notableConcern}` : ""}`
+          : "Performance  skipped"
+      );
+    } else {
+      lines.push(telemetry?.routing.perf ? "Performance  specialist running" : "Performance  waiting for routing");
+    }
+
+    if (telemetry?.user.signalsFound !== undefined) {
+      lines.push(
+        telemetry.routing.user
+          ? `User         ${telemetry.user.signalsFound} review signals${telemetry.user.notableConcern ? ` | ${telemetry.user.notableConcern}` : ""}`
+          : "User         skipped"
+      );
+    } else {
+      lines.push(telemetry?.routing.user ? "User         specialist running" : "User         waiting for routing");
+    }
+
+    if (telemetry?.recovery) {
+      lines.push(`Recovery     ${telemetry.recovery.issue}`);
+      lines.push(`Next         ${telemetry.recovery.action}`);
+    } else if (review || telemetry?.synthesis.verdict) {
+      const verdict = telemetry?.synthesis.verdict ?? review?.status ?? "pending";
+      const score = telemetry?.synthesis.score ?? review?.efficiencyScore;
+      const requiredChanges = telemetry?.synthesis.requiredChanges ?? review?.requiredChanges.length ?? 0;
+      const securityIssues = telemetry?.synthesis.securityIssues ?? review?.securityIssues.length ?? 0;
+      lines.push(`Verdict      ${verdict}${score !== undefined ? ` | score ${score}/10` : ""}`);
+      lines.push(
+        `Findings     ${severities.critical} critical | ${severities.major} major | ${severities.minor} minor | ${requiredChanges} required`
+      );
+      lines.push(`Security     ${securityIssues} issue${securityIssues === 1 ? "" : "s"}`);
+      if (telemetry?.synthesis.coverageAssessment) {
+        lines.push(`Coverage     ${telemetry.synthesis.coverageAssessment}`);
+      }
+      lines.push(`Next         ${telemetry?.nextStep ?? "await review decision"}`);
+    } else {
+      const synthesis =
+        telemetry?.stage === "synthesizing"
+          ? "tech lead consolidating findings"
+          : telemetry?.stage === "specialist-review"
+            ? "waiting on specialists"
+            : "routing specialists";
+      lines.push(`Synthesis    ${synthesis}`);
+      lines.push(`Next         ${telemetry?.nextStep ?? "route review specialists"}`);
+    }
+
+    return { title: "REVIEW INTELLIGENCE", lines };
+  }
+
+
   function updateSubagentEvent(agentName: string, role: string, taskId: string, event: any): void {
     let entry = subagentActivities.get(agentName);
     if (!entry) {
@@ -1593,8 +1245,26 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       state = bb.getState();
     }
 
-    // Default to the parent session's active model if no morph config is set.
-    ensureDefaultModelConfig(ctx as any);
+    // Follow the parent session's active model unless the user explicitly pins
+    // Morph to a manual provider/model via /morph:config.
+    const modelSync = syncInheritedModelConfig(ctx as any);
+    if (modelSync.changed && modelSync.clearedFailures > 0) {
+      const conf = bb.getState().config;
+      ctx.ui.notify(
+        `Morph now follows the parent session model: provider=${conf?.provider || "default"}, model=${conf?.model || "default"}. Cleared ${modelSync.clearedFailures} stale environment-failure result${modelSync.clearedFailures === 1 ? "" : "s"} from the previous model.`,
+        "info"
+      );
+    }
+    state = bb.getState();
+
+    const regressionRecovery = restoreTrustedRegressionSnapshot(bb, state);
+    if (regressionRecovery.restored) {
+      state = regressionRecovery.state;
+      ctx.ui.notify(
+        `State regression detected; restored the last safe work snapshot (${regressionRecovery.restoredTaskCount} completed task${regressionRecovery.restoredTaskCount === 1 ? "" : "s"} recovered).`,
+        "warning"
+      );
+    }
 
     let recovery = summarizeRecoveryState(state);
     const archivedRecovery =
@@ -1936,17 +1606,20 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
           signal: currentAbortController.signal,
 
           onWaveStart: async (wave, waveIndex) => {
-            // Update widget: mark wave tasks as "running"
-            for (const t of wave) liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
             setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
             const originalWaveNumber = Math.min(
               ...wave.map((task) => originalWaveByTaskId.get(task.id) ?? waveIndex + 1)
             );
             ctx.ui.notify(
-              `Work wave ${originalWaveNumber}/${plannedWaves.length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
+              `Work wave ${originalWaveNumber}/${plannedWaves.length}: ${wave.length} ready task${wave.length === 1 ? "" : "s"} · auto-running in batches of up to 3.`,
               "info"
             );
             return true;
+          },
+
+          onTaskStart: (task) => {
+            liveTasks.set(task.id, { ...liveTasks.get(task.id)!, status: "running" });
+            setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
           },
 
           onTaskComplete: (result) => {
@@ -1994,15 +1667,17 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         const done = results.filter((r) => r.status === "done").length;
         const failed = results.filter((r) => r.status === "failed").length;
         const blocked = results.filter((r) => r.status === "blocked").length;
-        const incomplete = done !== latestWorkState.planOutput!.tasks.length || failed > 0 || blocked > 0;
+        const totalTasks = latestWorkState.planOutput!.tasks.length;
+        const pending = Math.max(0, totalTasks - done - failed - blocked);
+        const incomplete = done !== totalTasks || failed > 0 || blocked > 0;
         const failedResults = results.filter((result) => result.status !== "done");
 
         setCurrentStatus("ready");
         ctx.ui.setStatus(
           "morph",
           incomplete
-            ? `morph:work HALTED ${done}/${results.length} done`
-            : `morph:review (ready) [DONE] ${done}/${results.length} done`
+            ? `morph:work HALTED ${done}/${totalTasks} done`
+            : `morph:review (ready) [DONE] ${done}/${totalTasks} done`
         );
         setPipelineWidget(ctx as any, () => buildPipelineDisplay());
 
@@ -2025,7 +1700,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         const summary = [
           incomplete ? `# Work Halted` : `# Work Complete`,
           ``,
-          `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}${blocked > 0 ? `  •  ${blocked} blocked` : ""}`,
+          `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}${blocked > 0 ? `  •  ${blocked} blocked` : ""}${pending > 0 ? `  •  ${pending} pending` : ""}`,
           ``,
           progressText,
           ``,
@@ -2046,8 +1721,8 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "work" } });
         ctx.ui.notify(
           incomplete
-            ? `Work halted: ${done}/${results.length} tasks complete. Review is blocked until work succeeds.`
-            : `Work done! ${done}/${results.length} tasks. /morph:review to audit.`,
+            ? `Work halted: ${done}/${totalTasks} tasks complete. Review is blocked until work succeeds.`
+            : `Work done! ${done}/${totalTasks} tasks. /morph:review to audit.`,
           (incomplete ? "warning" : "success") as any
         );
         } catch (err: any) {
@@ -2112,14 +1787,16 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
         subagentActivities.clear();
 
         ctx.ui.setStatus("morph", "morph:review Tech Lead synthesizing verdict...");
+        const readiness = assessReviewReadiness(reviewOutput);
+        const shipReady = allPlannedTasksDone && readiness.disposition === "ship_candidate";
 
         // Done
         setCurrentStatus("ready");
         ctx.ui.setStatus(
           "morph",
-          reviewOutput.status === "APPROVED"
+          shipReady
             ? "morph:ship (ready) [DONE]"
-            : `morph:work (fixes needed) [${reviewOutput.status}]`
+            : `morph:review (not ship-ready) [${reviewOutput.status}]`
         );
         updateWidget(ctx as any);
 
@@ -2145,17 +1822,17 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             ? `**Security**: ${reviewOutput.securityIssues.length} issues found`
             : `**Security**: No issues found`,
           ``,
-          reviewOutput.status === "APPROVED"
+          shipReady
             ? `State -> \`.morph/state.json\`  •  Next -> /morph:ship`
-            : `State -> \`.morph/state.json\`  •  Fix issues and re-run /morph:review`,
+            : `State -> \`.morph/state.json\`  |  Not ship-ready: ${readiness.reasons.join("; ") || "work is incomplete"}`,
         ].join("\n");
 
         pi.sendMessage({ customType: "morph", content: summary, display: true, details: { phase: "review" } });
           ctx.ui.notify(
-            reviewOutput.status === "APPROVED"
+            shipReady
               ? "Review APPROVED! /morph:ship to release."
-              : `Review: ${reviewOutput.status} — ${reviewOutput.requiredChanges.length} changes needed`,
-            (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
+              : `Review not ship-ready: ${readiness.reasons.join("; ") || "work is incomplete"}`,
+            (shipReady ? "success" : "warning") as any
           );
       } catch (err: any) {
         setCurrentStatus("ready");
@@ -2175,8 +1852,14 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       const bb = bindWorkspace(ctx.cwd);
       const state = bb.getState();
 
-      if (!state.reviewOutput || state.reviewOutput.status !== "APPROVED") {
-        ctx.ui.notify("Review must be APPROVED before shipping. Run /morph:review.", "error");
+      if (!state.reviewOutput) {
+        ctx.ui.notify("Review output is missing. Run /morph:review before shipping.", "error");
+        return;
+      }
+
+      const readiness = assessReviewReadiness(state.reviewOutput);
+      if (readiness.disposition !== "ship_candidate") {
+        ctx.ui.notify(`Review is not ship-ready: ${readiness.reasons.join("; ")}.`, "error");
         return;
       }
 
@@ -2322,12 +2005,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
             pi.sendMessage({ customType: "morph", content: sparkSummary, display: true, details: { phase: "spark" } });
 
-            const proceed = await waitConfirm(
-              ctx,
-              "Proceed to Plan phase?",
-              "Review the Spark output in chat. Confirm to continue.",
-              "spark"
-            );
+            const proceed = await reviewSparkGate(ctx, sparkOutput);
             if (!proceed) {
               ctx.ui.notify("Pipeline paused after Spark. Run /morph:run to continue.", "info");
               return;
@@ -2443,20 +2121,22 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                 const allDone = wave.every(t => liveTasks.get(t.id)?.status === "done");
                 if (allDone) return true;
 
-                for (const t of wave) {
-                  if (liveTasks.get(t.id)?.status !== "done") {
-                    liveTasks.set(t.id, { ...liveTasks.get(t.id)!, status: "running" });
-                  }
-                }
                 setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
                 const originalWaveNumber = Math.min(
                   ...wave.map((task) => originalWaveByTaskId.get(task.id) ?? waveIndex + 1)
                 );
                 ctx.ui.notify(
-                  `Work wave ${originalWaveNumber}/${plannedWaves.length}: executing ${wave.length} approved task${wave.length === 1 ? "" : "s"} automatically.`,
+                  `Work wave ${originalWaveNumber}/${plannedWaves.length}: ${wave.length} ready task${wave.length === 1 ? "" : "s"} · auto-running in batches of up to 3.`,
                   "info"
                 );
                 return true;
+              },
+
+              onTaskStart: (task) => {
+                if (liveTasks.get(task.id)?.status !== "done") {
+                  liveTasks.set(task.id, { ...liveTasks.get(task.id)!, status: "running" });
+                }
+                setPipelineWidget(ctx as any, () => buildPipelineDisplay([...liveTasks.values()]));
               },
 
               onTaskComplete: (result) => {
@@ -2494,20 +2174,22 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             const done = results.filter((r) => r.status === "done").length;
             const failed = results.filter((r) => r.status === "failed").length;
             const blocked = results.filter((r) => r.status === "blocked").length;
-            const incomplete = done !== state.planOutput!.tasks.length || failed > 0 || blocked > 0;
+            const totalTasks = state.planOutput!.tasks.length;
+            const pending = Math.max(0, totalTasks - done - failed - blocked);
+            const incomplete = done !== totalTasks || failed > 0 || blocked > 0;
             const failedResults = results.filter((result) => result.status !== "done");
             setCurrentStatus("ready");
             ctx.ui.setStatus(
               "morph",
               incomplete
-                ? `morph:run Work HALTED: ${done}/${results.length} done`
-                : `morph:run Work: ${done}/${results.length} done`
+                ? `morph:run Work HALTED: ${done}/${totalTasks} done`
+                : `morph:run Work: ${done}/${totalTasks} done`
             );
             updateWidget(ctx as any);
             ctx.ui.notify(
               incomplete
-                ? `Work halted: ${done}/${results.length} tasks complete. Review is blocked until work succeeds.`
-                : `Work complete! ${done}/${results.length} tasks done.`,
+                ? `Work halted: ${done}/${totalTasks} tasks complete. Review is blocked until work succeeds.`
+                : `Work complete! ${done}/${totalTasks} tasks done.`,
               (incomplete ? "warning" : "success") as any
             );
 
@@ -2519,7 +2201,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
             const workSummary = [
               incomplete ? `# Work Halted` : `# Work Complete`,
               ``,  
-              `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}${blocked > 0 ? `  •  ${blocked} blocked` : ""}`,
+              `**${done} done**${failed > 0 ? `  •  ${failed} failed` : ""}${blocked > 0 ? `  •  ${blocked} blocked` : ""}${pending > 0 ? `  •  ${pending} pending` : ""}`,
               ``,  
               progressText,
               ``,
@@ -2580,6 +2262,16 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
         // ── Review ──
         if (state.phase === "review") {
+          if (!isWorkReadyForReview(state)) {
+            bb.transition("work");
+            state = bb.getState();
+            ctx.ui.notify(
+              "Review blocked: WORK is incomplete. Returning to WORK instead of auditing stale or partial state.",
+              "warning"
+            );
+            continue;
+          }
+
           setCurrentStatus("busy");
           ctx.ui.setStatus("morph", "morph:run Review phase...");
           ctx.ui.notify("Review: Tech Lead + QA + Perf + End User auditing...", "info");
@@ -2609,23 +2301,32 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
                 (reviewOutput.status === "APPROVED" ? "success" : "warning") as any
               );
 
-            if (reviewOutput.status !== "APPROVED") {
-              const taskIdsToReset = reviewOutput.requiredChanges
-                .map(c => c.taskId)
-                .filter((id): id is string => !!id);
-              
-              if (taskIdsToReset.length > 0) {
-                bb.clearWorkResults(taskIdsToReset);
-              } else {
-                // If no specific tasks, reset all tasks to be safe
-                bb.clearWorkResults();
+            const readiness = assessReviewReadiness(reviewOutput);
+            if (readiness.disposition !== "ship_candidate") {
+              if (readiness.disposition === "auto_repair") {
+                bb.clearWorkResults(readiness.actionableTaskIds);
+                bb.transition("work");
+                ctx.ui.notify(
+                  `Review below ship floor: ${readiness.reasons.join("; ")}. Auto-recovering ${readiness.actionableTaskIds.length} targeted task${readiness.actionableTaskIds.length === 1 ? "" : "s"} inside the approved work scope.`,
+                  "info"
+                );
+                state = bb.getState();
+                continue;
               }
-              
+
+              bb.transition("review");
+              state = bb.getState();
               ctx.ui.notify(
-                `Review ${reviewOutput.status}: auto-recovering ${taskIdsToReset.length > 0 ? taskIdsToReset.length : "all"} task${taskIdsToReset.length === 1 ? "" : "s"} inside the approved work scope.`,
-                "info"
+                `Review below ship floor but not actionable automatically: ${readiness.reasons.join("; ")}. Opening an explicit exception gate instead of resetting completed work.`,
+                "warning"
               );
-              state = bb.getState(); // Refresh state after transition in setReviewOutput
+              const accepted = await reviewExceptionGate(ctx, readiness);
+              if (!accepted) {
+                ctx.ui.notify("Pipeline paused at release exception. Resolve the issue, then re-run /morph:run when ready.", "info");
+                return;
+              }
+              bb.transition("ship");
+              state = bb.getState();
               continue;
             }
 
@@ -2645,13 +2346,7 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
 
             pi.sendMessage({ customType: "morph", content: reviewSummary, display: true, details: { phase: "review" } });
 
-            ensureWebServer();
-            const proceed = await waitConfirm(
-              ctx,
-              "Proceed to Ship phase?",
-              "Review approved! Review details in chat and confirm to release.",
-              "review"
-            );
+            const proceed = await reviewShipGate(ctx);
             if (!proceed) {
               ctx.ui.notify("Pipeline paused after Review. Run /morph:run to continue.", "info");
               return;
@@ -2721,45 +2416,52 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
   // ═══════════════════════════════════════════
 
   pi.registerCommand("morph:config", {
-    description: "Configure the model for morph agents (e.g. /morph:config provider=anthropic model=claude-3-5-sonnet-20241022)",
+    description: "Configure the model for morph agents (e.g. /morph:config provider=anthropic model=claude-3-5-sonnet-20241022, or /morph:config inherit)",
     handler: async (args, ctx) => {
       const bb = bindWorkspace(ctx.cwd);
       
       if (!args.trim()) {
         const conf = bb.getState().config;
-        ctx.ui.notify(`Current morph config: provider=${conf?.provider || "default"}, model=${conf?.model || "default"}`, "info");
+        ctx.ui.notify(`Current morph config: provider=${conf?.provider || "default"}, model=${conf?.model || "default"}, source=${conf?.source || "inherited"}`, "info");
         return;
       }
 
+      const previousConfig = { ...bb.getState().config };
+      const normalizedArgs = args.trim().toLowerCase();
+      const followParent = normalizedArgs === "inherit" || normalizedArgs === "follow=parent" || normalizedArgs === "source=inherited";
       const newConfig: any = {};
-      for (const part of args.split(" ")) {
-        const [k, v] = part.split("=");
-        if (k && v) newConfig[k] = v;
+
+      if (followParent) {
+        const model = ctx.model;
+        newConfig.provider = model?.provider ? String(model.provider) : undefined;
+        newConfig.model = model?.id ? String(model.id) : undefined;
+        newConfig.source = "inherited";
+      } else {
+        for (const part of args.split(" ")) {
+          const [k, v] = part.split("=");
+          if (k && v) newConfig[k] = v;
+        }
+        newConfig.source = "manual";
       }
 
-      const previousConfig = { ...bb.getState().config };
       bb.setConfig(newConfig);
       const currentConfig = bb.getState().config;
       const providerChanged =
-        Boolean(newConfig.provider) && newConfig.provider !== previousConfig.provider;
+        currentConfig.provider !== previousConfig.provider;
       const modelChanged =
-        Boolean(newConfig.model) && newConfig.model !== previousConfig.model;
-      const staleToolFailures = bb
-        .getState()
-        .workResults
-        .filter((result) => result.status === "failed" && result.failureKind === "TOOL_FAILURE")
-        .map((result) => result.taskId);
+        currentConfig.model !== previousConfig.model;
+      const staleEnvironmentFailuresCleared =
+        providerChanged || modelChanged ? clearStaleEnvironmentFailures(bb) : 0;
 
-      if ((providerChanged || modelChanged) && staleToolFailures.length > 0) {
-        bb.clearWorkResults(staleToolFailures);
+      if (staleEnvironmentFailuresCleared > 0) {
         ctx.ui.notify(
-          `Updated morph config: provider=${currentConfig?.provider || "default"}, model=${currentConfig?.model || "default"}. Cleared ${staleToolFailures.length} stale tool-failure result${staleToolFailures.length === 1 ? "" : "s"} so the next run retries against the new config.`,
+          `Updated morph config: provider=${currentConfig?.provider || "default"}, model=${currentConfig?.model || "default"}, source=${currentConfig?.source || "inherited"}. Cleared ${staleEnvironmentFailuresCleared} stale environment-failure result${staleEnvironmentFailuresCleared === 1 ? "" : "s"} so the next run retries against the new config.`,
           "success" as any
         );
         return;
       }
 
-      ctx.ui.notify(`Updated morph config: provider=${currentConfig?.provider || "default"}, model=${currentConfig?.model || "default"}`, "success" as any);
+      ctx.ui.notify(`Updated morph config: provider=${currentConfig?.provider || "default"}, model=${currentConfig?.model || "default"}, source=${currentConfig?.source || "inherited"}`, "success" as any);
     }
   });
 
@@ -2804,6 +2506,15 @@ Opened \`${htmlPath}\` for the final visual approval gate. Approve there or from
       if (state.phase === "done") {
         ctx.ui.notify("Pipeline already complete. Nothing to recover.", "info");
         return;
+      }
+
+      const regressionRecovery = restoreTrustedRegressionSnapshot(bb, state);
+      if (regressionRecovery.restored) {
+        state = regressionRecovery.state;
+        ctx.ui.notify(
+          `State regression detected; restored the last safe work snapshot (${regressionRecovery.restoredTaskCount} completed task${regressionRecovery.restoredTaskCount === 1 ? "" : "s"} recovered).`,
+          "warning"
+        );
       }
 
       const diagnosis = diagnoseRecoveryState(state);
