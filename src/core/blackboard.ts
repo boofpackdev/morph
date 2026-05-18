@@ -1,5 +1,5 @@
-﻿/**
- * morph â€” Blackboard Pattern
+/**
+ * morph — Blackboard Pattern
  *
  * Centralized state management. Agents never hold state in their own memory.
  * They read from and write to .morph/state.json (the "Blackboard").
@@ -65,7 +65,7 @@ export interface ArchivedMorphState {
 }
 
 /**
- * Central Blackboard â€” load, mutate, and save morph state.
+ * Central Blackboard -" load, mutate, and save morph state.
  */
 export class Blackboard {
   private cwd: string;
@@ -123,21 +123,35 @@ export class Blackboard {
         const raw = fs.readFileSync(statePath, "utf-8");
         const parsed = JSON.parse(raw);
         const result = MorphStateSchema.safeParse(parsed);
-        if (result.success) return result.data;
+        if (result.success) {
+          // Backfill startedAt for legacy state files
+          if (!result.data.startedAt && result.data.phase !== "idle") {
+            result.data.startedAt = new Date().toISOString();
+          }
+          return result.data;
+        }
         const repaired = repairPersistedState(parsed);
         const repairedResult = MorphStateSchema.safeParse(repaired);
         if (repairedResult.success) {
           this.archiveState(parsed, "repaired");
           fs.writeFileSync(statePath, JSON.stringify(repairedResult.data, null, 2) + "\n", "utf-8");
+          if (!repairedResult.data.startedAt && repairedResult.data.phase !== "idle") {
+            repairedResult.data.startedAt = new Date().toISOString();
+          }
           return repairedResult.data;
         }
-        // Malformed state â€” archive and start fresh
+        // Malformed state - archive and start fresh
         this.archiveState(parsed, "malformed");
       } catch {
-        // Corrupt file â€” start fresh
+        // Corrupt file - start fresh
       }
     }
-    return createInitialState();
+    const initial = createInitialState();
+    // Backfill startedAt for legacy state files
+    if (!initial.startedAt && initial.phase !== "idle") {
+      initial.startedAt = new Date().toISOString();
+    }
+    return initial;
   }
 
   /** Schedule a deferred save. Multiple calls within the same tick only flush once. */
@@ -460,7 +474,7 @@ export class Blackboard {
   /** Get a summary of the state for agent context. */
   getContextualSummary(maxTokens: number = 2000): string {
     const s = this.state;
-    const lines: string[] = [`# Morph State â€” Phase: ${s.phase}`];
+    const lines: string[] = [`# Morph State -" Phase: ${s.phase}`];
     lines.push("");
 
     if (s.sparkOutput) {
